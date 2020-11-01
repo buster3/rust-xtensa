@@ -260,7 +260,6 @@ impl<'a> Visitor<'a> for PostExpansionVisitor<'a> {
                     cfg => doc_cfg
                     masked => doc_masked
                     spotlight => doc_spotlight
-                    alias => doc_alias
                     keyword => doc_keyword
                 );
             }
@@ -630,6 +629,7 @@ pub fn check_crate(krate: &ast::Crate, sess: &Session) {
     gate_all!(const_trait_bound_opt_out, "`?const` on trait bounds is experimental");
     gate_all!(const_trait_impl, "const trait impls are experimental");
     gate_all!(half_open_range_patterns, "half-open range patterns are unstable");
+    gate_all!(inline_const, "inline-const is experimental");
 
     // All uses of `gate_all!` below this point were added in #65742,
     // and subsequently disabled (with the non-early gating readded).

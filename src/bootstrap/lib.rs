@@ -121,7 +121,7 @@ use std::os::windows::fs::symlink_file;
 use build_helper::{mtime, output, run, run_suppressed, t, try_run, try_run_suppressed};
 use filetime::FileTime;
 
-use crate::config::TargetSelection;
+use crate::config::{LlvmLibunwind, TargetSelection};
 use crate::util::{exe, libdir, CiEnv};
 
 mod builder;
@@ -141,6 +141,7 @@ mod metadata;
 mod native;
 mod run;
 mod sanity;
+mod setup;
 mod test;
 mod tool;
 mod toolstate;
@@ -165,7 +166,7 @@ mod job {
 
 use crate::cache::{Interned, INTERNER};
 pub use crate::config::Config;
-use crate::flags::Subcommand;
+pub use crate::flags::Subcommand;
 
 const LLVM_TOOLS: &[&str] = &[
     "llvm-nm", // used to inspect binaries; it shows symbol names, their sizes and visibility
@@ -176,7 +177,12 @@ const LLVM_TOOLS: &[&str] = &[
     "llvm-size", // used to prints the size of the linker sections of a program
     "llvm-strip", // used to discard symbols from binary files to reduce their size
     "llvm-ar", // used for creating and modifying archive files
+    "llvm-dis", // used to disassemble LLVM bitcode
+    "llc",     // used to compile LLVM bytecode
+    "opt",     // used to optimize LLVM bytecode
 ];
+
+pub const VERSION: usize = 2;
 
 /// A structure representing a Rust compiler.
 ///
@@ -217,6 +223,9 @@ pub enum GitRepo {
 pub struct Build {
     /// User-specified configuration from `config.toml`.
     config: Config,
+
+    // Version information
+    version: String,
 
     // Properties derived from the above configuration
     src: PathBuf,
@@ -297,6 +306,9 @@ pub enum Mode {
 
     /// Build librustc, and compiler libraries, placing output in the "stageN-rustc" directory.
     Rustc,
+
+    /// Build a codegen backend for rustc, placing the output in the "stageN-codegen" directory.
+    Codegen,
 
     /// Build a tool, placing output in the "stage0-bootstrap-tools"
     /// directory. This is for miscellaneous sets of tools that are built
@@ -380,6 +392,10 @@ impl Build {
             .unwrap()
             .to_path_buf();
 
+        let version = std::fs::read_to_string(src.join("src").join("version"))
+            .expect("failed to read src/version");
+        let version = version.trim();
+
         let mut build = Build {
             initial_rustc: config.initial_rustc.clone(),
             initial_cargo: config.initial_cargo.clone(),
@@ -395,6 +411,7 @@ impl Build {
             targets: config.targets.clone(),
 
             config,
+            version: version.to_string(),
             src,
             out,
 
@@ -433,8 +450,7 @@ impl Build {
             .next()
             .unwrap()
             .trim();
-        let my_version = channel::CFG_RELEASE_NUM;
-        if local_release.split('.').take(2).eq(my_version.split('.').take(2)) {
+        if local_release.split('.').take(2).eq(version.split('.').take(2)) {
             build.verbose(&format!("auto-detected local-rebuild {}", local_release));
             build.local_rebuild = true;
         }
@@ -461,6 +477,10 @@ impl Build {
 
         if let Subcommand::Clean { all } = self.config.cmd {
             return clean::clean(self, all);
+        }
+
+        if let Subcommand::Setup { profile } = &self.config.cmd {
+            return setup::setup(&self.config.src, *profile);
         }
 
         {
@@ -520,8 +540,10 @@ impl Build {
     fn std_features(&self) -> String {
         let mut features = "panic-unwind".to_string();
 
-        if self.config.llvm_libunwind {
-            features.push_str(" llvm-libunwind");
+        match self.config.llvm_libunwind.unwrap_or_default() {
+            LlvmLibunwind::InTree => features.push_str(" llvm-libunwind"),
+            LlvmLibunwind::System => features.push_str(" system-llvm-libunwind"),
+            LlvmLibunwind::No => {}
         }
         if self.config.backtrace {
             features.push_str(" backtrace");
@@ -541,6 +563,16 @@ impl Build {
         if self.config.llvm_enabled() {
             features.push_str(" llvm");
         }
+
+        // If debug logging is on, then we want the default for tracing:
+        // https://github.com/tokio-rs/tracing/blob/3dd5c03d907afdf2c39444a29931833335171554/tracing/src/level_filters.rs#L26
+        // which is everything (including debug/trace/etc.)
+        // if its unset, if debug_assertions is on, then debug_logging will also be on
+        // as well as tracing *ignoring* this feature when debug_assertions is on
+        if !self.config.rust_debug_logging {
+            features.push_str(" max_level_info");
+        }
+
         features
     }
 
@@ -567,6 +599,7 @@ impl Build {
         let suffix = match mode {
             Mode::Std => "-std",
             Mode::Rustc => "-rustc",
+            Mode::Codegen => "-codegen",
             Mode::ToolBootstrap => "-bootstrap-tools",
             Mode::ToolStd | Mode::ToolRustc => "-tools",
         };
@@ -611,6 +644,10 @@ impl Build {
     ///
     /// If no custom `llvm-config` was specified then Rust's llvm will be used.
     fn is_rust_llvm(&self, target: TargetSelection) -> bool {
+        if self.config.llvm_from_ci && target == self.config.build {
+            return true;
+        }
+
         match self.config.target_config.get(&target) {
             Some(ref c) => c.llvm_config.is_none(),
             None => true,
@@ -771,7 +808,7 @@ impl Build {
 
         match which {
             GitRepo::Rustc => {
-                let sha = self.rust_sha().unwrap_or(channel::CFG_RELEASE_NUM);
+                let sha = self.rust_sha().unwrap_or(&self.version);
                 Some(format!("/rustc/{}", sha))
             }
             GitRepo::Llvm => Some(String::from("/rustc/llvm")),
@@ -1002,7 +1039,7 @@ impl Build {
 
     /// Returns the value of `release` above for Rust itself.
     fn rust_release(&self) -> String {
-        self.release(channel::CFG_RELEASE_NUM)
+        self.release(&self.version)
     }
 
     /// Returns the "package version" for a component given the `num` release
@@ -1022,41 +1059,7 @@ impl Build {
 
     /// Returns the value of `package_vers` above for Rust itself.
     fn rust_package_vers(&self) -> String {
-        self.package_vers(channel::CFG_RELEASE_NUM)
-    }
-
-    /// Returns the value of `package_vers` above for Cargo
-    fn cargo_package_vers(&self) -> String {
-        self.package_vers(&self.release_num("cargo"))
-    }
-
-    /// Returns the value of `package_vers` above for rls
-    fn rls_package_vers(&self) -> String {
-        self.package_vers(&self.release_num("rls"))
-    }
-
-    /// Returns the value of `package_vers` above for rust-analyzer
-    fn rust_analyzer_package_vers(&self) -> String {
-        self.package_vers(&self.release_num("rust-analyzer/crates/rust-analyzer"))
-    }
-
-    /// Returns the value of `package_vers` above for clippy
-    fn clippy_package_vers(&self) -> String {
-        self.package_vers(&self.release_num("clippy"))
-    }
-
-    /// Returns the value of `package_vers` above for miri
-    fn miri_package_vers(&self) -> String {
-        self.package_vers(&self.release_num("miri"))
-    }
-
-    /// Returns the value of `package_vers` above for rustfmt
-    fn rustfmt_package_vers(&self) -> String {
-        self.package_vers(&self.release_num("rustfmt"))
-    }
-
-    fn llvm_tools_package_vers(&self) -> String {
-        self.package_vers(channel::CFG_RELEASE_NUM)
+        self.package_vers(&self.version)
     }
 
     fn llvm_tools_vers(&self) -> String {
@@ -1073,7 +1076,7 @@ impl Build {
     /// Note that this is a descriptive string which includes the commit date,
     /// sha, version, etc.
     fn rust_version(&self) -> String {
-        self.rust_info.version(self, channel::CFG_RELEASE_NUM)
+        self.rust_info.version(self, &self.version)
     }
 
     /// Returns the full commit hash.

@@ -85,7 +85,7 @@
 //! # Contributing changes to the documentation
 //!
 //! Check out the rust contribution guidelines [here](
-//! https://rustc-dev-guide.rust-lang.org/getting-started.html).
+//! https://rustc-dev-guide.rust-lang.org/contributing.html#writing-documentation).
 //! The source for this documentation can be found on
 //! [GitHub](https://github.com/rust-lang/rust).
 //! To contribute changes, make sure you read the guidelines first, then submit
@@ -206,6 +206,7 @@
 #![needs_panic_runtime]
 // std may use features in a platform-specific way
 #![allow(unused_features)]
+#![cfg_attr(not(bootstrap), feature(rustc_allow_const_fn_unstable))]
 #![cfg_attr(test, feature(print_internals, set_stdio, update_panic_count))]
 #![cfg_attr(
     all(target_vendor = "fortanix", target_env = "sgx"),
@@ -226,9 +227,9 @@
 #![feature(asm)]
 #![feature(associated_type_bounds)]
 #![feature(atomic_mut_ptr)]
+#![feature(bool_to_option)]
 #![feature(box_syntax)]
 #![feature(c_variadic)]
-#![feature(can_vector)]
 #![feature(cfg_accessible)]
 #![feature(cfg_target_has_atomic)]
 #![feature(cfg_target_thread_local)]
@@ -237,7 +238,11 @@
 #![feature(clamp)]
 #![feature(concat_idents)]
 #![feature(const_cstr_unchecked)]
+#![feature(const_fn_floating_point_arithmetic)]
 #![feature(const_fn_transmute)]
+#![feature(const_fn)]
+#![feature(const_fn_fn_ptr_basics)]
+#![feature(const_ip)]
 #![feature(const_ipv6)]
 #![feature(const_raw_ptr_deref)]
 #![feature(const_ipv4)]
@@ -245,7 +250,6 @@
 #![feature(core_intrinsics)]
 #![feature(custom_test_frameworks)]
 #![feature(decl_macro)]
-#![feature(doc_alias)]
 #![feature(doc_cfg)]
 #![feature(doc_keyword)]
 #![feature(doc_masked)]
@@ -256,19 +260,18 @@
 #![feature(exhaustive_patterns)]
 #![feature(extend_one)]
 #![feature(external_doc)]
+#![feature(fmt_as_str)]
 #![feature(fn_traits)]
 #![feature(format_args_nl)]
 #![feature(gen_future)]
 #![feature(generator_trait)]
 #![feature(global_asm)]
-#![feature(hash_raw_entry)]
 #![feature(hashmap_internals)]
 #![feature(int_error_internals)]
 #![feature(int_error_matching)]
 #![feature(integer_atomics)]
 #![feature(into_future)]
 #![feature(lang_items)]
-#![feature(libc)]
 #![feature(link_args)]
 #![feature(linkage)]
 #![feature(llvm_asm)]
@@ -309,13 +312,16 @@
 #![feature(str_internals)]
 #![feature(test)]
 #![feature(thread_local)]
+#![feature(thread_local_internals)]
 #![feature(toowned_clone_into)]
 #![feature(total_cmp)]
 #![feature(trace_macros)]
 #![feature(try_reserve)]
 #![feature(unboxed_closures)]
 #![feature(unsafe_block_in_unsafe_fn)]
-#![feature(untagged_unions)]
+#![feature(unsafe_cell_get_mut)]
+#![feature(unsafe_cell_raw_get)]
+#![cfg_attr(bootstrap, feature(untagged_unions))]
 #![feature(unwind_attributes)]
 #![feature(vec_into_raw_parts)]
 #![feature(wake_trait)]

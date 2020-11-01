@@ -270,7 +270,7 @@ impl Step for Rls {
             &[],
         );
 
-        builder.add_rustc_lib_path(compiler, &mut cargo);
+        cargo.add_rustc_lib_path(builder, compiler);
         cargo.arg("--").args(builder.config.cmd.test_args());
 
         if try_run(builder, &mut cargo.into()) {
@@ -328,7 +328,7 @@ impl Step for Rustfmt {
         t!(fs::create_dir_all(&dir));
         cargo.env("RUSTFMT_TEST_DIR", dir);
 
-        builder.add_rustc_lib_path(compiler, &mut cargo);
+        cargo.add_rustc_lib_path(builder, compiler);
 
         if try_run(builder, &mut cargo.into()) {
             builder.save_toolstate("rustfmt", ToolState::TestPass);
@@ -449,7 +449,7 @@ impl Step for Miri {
 
             cargo.arg("--").args(builder.config.cmd.test_args());
 
-            builder.add_rustc_lib_path(compiler, &mut cargo);
+            cargo.add_rustc_lib_path(builder, compiler);
 
             if !try_run(builder, &mut cargo.into()) {
                 return;
@@ -554,7 +554,7 @@ impl Step for Clippy {
 
         cargo.arg("--").args(builder.config.cmd.test_args());
 
-        builder.add_rustc_lib_path(compiler, &mut cargo);
+        cargo.add_rustc_lib_path(builder, compiler);
 
         builder.run(&mut cargo.into());
     }
@@ -636,7 +636,7 @@ impl Step for RustdocJSStd {
                 .arg("--crate-name")
                 .arg("std")
                 .arg("--resource-suffix")
-                .arg(crate::channel::CFG_RELEASE_NUM)
+                .arg(&builder.version)
                 .arg("--doc-folder")
                 .arg(builder.doc_out(self.target))
                 .arg("--test-folder")
@@ -737,6 +737,7 @@ impl Step for Tidy {
         let mut cmd = builder.tool_cmd(Tool::Tidy);
         cmd.arg(&builder.src);
         cmd.arg(&builder.initial_cargo);
+        cmd.arg(&builder.out);
         if builder.is_verbose() {
             cmd.arg("--verbose");
         }
@@ -966,6 +967,15 @@ impl Step for Compiletest {
     /// compiletest `mode` and `suite` arguments. For example `mode` can be
     /// "run-pass" or `suite` can be something like `debuginfo`.
     fn run(self, builder: &Builder<'_>) {
+        if builder.top_stage == 0 && env::var("COMPILETEST_FORCE_STAGE0").is_err() {
+            eprintln!("\
+error: `--stage 0` runs compiletest on the beta compiler, not your local changes, and will almost always cause tests to fail
+help: use `--stage 1` instead
+note: if you're sure you want to do this, please open an issue as to why. In the meantime, you can override this with `COMPILETEST_FORCE_STAGE0=1`."
+            );
+            std::process::exit(1);
+        }
+
         let compiler = self.compiler;
         let target = self.target;
         let mode = self.mode;
@@ -1192,7 +1202,7 @@ impl Step for Compiletest {
 
             // Only pass correct values for these flags for the `run-make` suite as it
             // requires that a C++ compiler was configured which isn't always the case.
-            if !builder.config.dry_run && suite == "run-make-fulldeps" {
+            if !builder.config.dry_run && matches!(suite, "run-make" | "run-make-fulldeps") {
                 cmd.arg("--cc")
                     .arg(builder.cc(target))
                     .arg("--cxx")
@@ -1280,6 +1290,8 @@ impl Step for Compiletest {
         if builder.config.cmd.rustfix_coverage() {
             cmd.arg("--rustfix-coverage");
         }
+
+        cmd.env("BOOTSTRAP_CARGO", &builder.initial_cargo);
 
         builder.ci_env.force_coloring_in_ci(&mut cmd);
 
@@ -2022,6 +2034,8 @@ impl Step for Bootstrap {
             .current_dir(builder.src.join("src/bootstrap"))
             .env("RUSTFLAGS", "-Cdebuginfo=2")
             .env("CARGO_TARGET_DIR", builder.out.join("bootstrap"))
+            .env("BOOTSTRAP_OUTPUT_DIRECTORY", &builder.config.out)
+            .env("BOOTSTRAP_INITIAL_CARGO", &builder.config.initial_cargo)
             .env("RUSTC_BOOTSTRAP", "1")
             .env("RUSTC", &builder.initial_rustc);
         if let Some(flags) = option_env!("RUSTFLAGS") {

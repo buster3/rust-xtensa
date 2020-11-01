@@ -70,7 +70,7 @@ fn main() {
     let host = env::var("HOST").expect("HOST was not set");
     let is_crossed = target != host;
 
-    let mut optional_components = vec![
+    let optional_components = &[
         "x86",
         "arm",
         "aarch64",
@@ -85,6 +85,7 @@ fn main() {
         "sparc",
         "nvptx",
         "hexagon",
+        "riscv",
         "xtensa"
     ];
 
@@ -95,12 +96,8 @@ fn main() {
     let (major, _minor) = if let (Some(major), Some(minor)) = (parts.next(), parts.next()) {
         (major, minor)
     } else {
-        (6, 0)
+        (8, 0)
     };
-
-    if major > 6 {
-        optional_components.push("riscv");
-    }
 
     let required_components = &[
         "ipo",

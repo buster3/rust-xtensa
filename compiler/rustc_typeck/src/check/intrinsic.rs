@@ -106,8 +106,8 @@ pub fn intrinsic_operation_unsafety(intrinsic: Symbol) -> hir::Unsafety {
     }
 }
 
-/// Remember to add all intrinsics here, in librustc_codegen_llvm/intrinsic.rs,
-/// and in libcore/intrinsics.rs
+/// Remember to add all intrinsics here, in `compiler/rustc_codegen_llvm/src/intrinsic.rs`,
+/// and in `library/core/src/intrinsics.rs`.
 pub fn check_intrinsic_type(tcx: TyCtxt<'_>, it: &hir::ForeignItem<'_>) {
     let param = |n| tcx.mk_ty_param(n, Symbol::intern(&format!("P{}", n)));
     let def_id = tcx.hir().local_def_id(it.hir_id).to_def_id();
@@ -328,14 +328,14 @@ pub fn check_intrinsic_type(tcx: TyCtxt<'_>, it: &hir::ForeignItem<'_>) {
 
             kw::Try => {
                 let mut_u8 = tcx.mk_mut_ptr(tcx.types.u8);
-                let try_fn_ty = ty::Binder::bind(tcx.mk_fn_sig(
+                let try_fn_ty = ty::Binder::dummy(tcx.mk_fn_sig(
                     iter::once(mut_u8),
                     tcx.mk_unit(),
                     false,
                     hir::Unsafety::Normal,
                     Abi::Rust,
                 ));
-                let catch_fn_ty = ty::Binder::bind(tcx.mk_fn_sig(
+                let catch_fn_ty = ty::Binder::dummy(tcx.mk_fn_sig(
                     [mut_u8, mut_u8].iter().cloned(),
                     tcx.mk_unit(),
                     false,

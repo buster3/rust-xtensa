@@ -1,5 +1,6 @@
 use crate::check::FnCtxt;
 use rustc_ast as ast;
+
 use rustc_ast::util::lev_distance::find_best_match_for_name;
 use rustc_data_structures::fx::FxHashMap;
 use rustc_errors::{pluralize, struct_span_err, Applicability, DiagnosticBuilder};
@@ -494,7 +495,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
             self.tcx.sess,
             span,
             E0029,
-            "only char and numeric types are allowed in range patterns"
+            "only `char` and numeric types are allowed in range patterns"
         );
         let msg = |ty| format!("this is of type `{}` but it should be `char` or numeric", ty);
         let mut one_side_err = |first_span, first_ty, second: Option<(bool, Ty<'tcx>, Span)>| {
@@ -740,6 +741,40 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         pat_ty
     }
 
+    fn maybe_suggest_range_literal(
+        &self,
+        e: &mut DiagnosticBuilder<'_>,
+        opt_def_id: Option<hir::def_id::DefId>,
+        ident: Ident,
+    ) -> bool {
+        match opt_def_id {
+            Some(def_id) => match self.tcx.hir().get_if_local(def_id) {
+                Some(hir::Node::Item(hir::Item {
+                    kind: hir::ItemKind::Const(_, body_id), ..
+                })) => match self.tcx.hir().get(body_id.hir_id) {
+                    hir::Node::Expr(expr) => {
+                        if hir::is_range_literal(expr) {
+                            let span = self.tcx.hir().span(body_id.hir_id);
+                            if let Ok(snip) = self.tcx.sess.source_map().span_to_snippet(span) {
+                                e.span_suggestion_verbose(
+                                    ident.span,
+                                    "you may want to move the range into the match block",
+                                    snip,
+                                    Applicability::MachineApplicable,
+                                );
+                                return true;
+                            }
+                        }
+                    }
+                    _ => (),
+                },
+                _ => (),
+            },
+            _ => (),
+        }
+        false
+    }
+
     fn emit_bad_pat_path(
         &self,
         mut e: DiagnosticBuilder<'_>,
@@ -772,12 +807,12 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                         );
                     }
                     _ => {
-                        let const_def_id = match pat_ty.kind() {
+                        let (type_def_id, item_def_id) = match pat_ty.kind() {
                             Adt(def, _) => match res {
-                                Res::Def(DefKind::Const, _) => Some(def.did),
-                                _ => None,
+                                Res::Def(DefKind::Const, def_id) => (Some(def.did), Some(def_id)),
+                                _ => (None, None),
                             },
-                            _ => None,
+                            _ => (None, None),
                         };
 
                         let ranges = &[
@@ -788,11 +823,13 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                             self.tcx.lang_items().range_inclusive_struct(),
                             self.tcx.lang_items().range_to_inclusive_struct(),
                         ];
-                        if const_def_id != None && ranges.contains(&const_def_id) {
-                            let msg = "constants only support matching by type, \
-                                if you meant to match against a range of values, \
-                                consider using a range pattern like `min ..= max` in the match block";
-                            e.note(msg);
+                        if type_def_id != None && ranges.contains(&type_def_id) {
+                            if !self.maybe_suggest_range_literal(&mut e, item_def_id, *ident) {
+                                let msg = "constants only support matching by type, \
+                                    if you meant to match against a range of values, \
+                                    consider using a range pattern like `min ..= max` in the match block";
+                                e.note(msg);
+                            }
                         } else {
                             let msg = "introduce a new binding instead";
                             let sugg = format!("other_{}", ident.as_str().to_lowercase());
@@ -1141,16 +1178,16 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         } else if !etc && !unmentioned_fields.is_empty() {
             let no_accessible_unmentioned_fields = unmentioned_fields
                 .iter()
-                .filter(|(field, _)| {
+                .find(|(field, _)| {
                     field.vis.is_accessible_from(tcx.parent_module(pat.hir_id).to_def_id(), tcx)
                 })
-                .next()
                 .is_none();
 
             if no_accessible_unmentioned_fields {
                 unmentioned_err = Some(self.error_no_accessible_fields(pat, &fields));
             } else {
-                unmentioned_err = Some(self.error_unmentioned_fields(pat, &unmentioned_fields));
+                unmentioned_err =
+                    Some(self.error_unmentioned_fields(pat, &unmentioned_fields, &fields));
             }
         }
         match (inexistent_fields_err, unmentioned_err) {
@@ -1344,7 +1381,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
     /// Returns a diagnostic reporting a struct pattern which is missing an `..` due to
     /// inaccessible fields.
     ///
-    /// ```ignore (diagnostic)
+    /// ```text
     /// error: pattern requires `..` due to inaccessible fields
     ///   --> src/main.rs:10:9
     ///    |
@@ -1394,7 +1431,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
 
     /// Returns a diagnostic reporting a struct pattern which does not mention some fields.
     ///
-    /// ```ignore (diagnostic)
+    /// ```text
     /// error[E0027]: pattern does not mention field `you_cant_use_this_field`
     ///   --> src/main.rs:15:9
     ///    |
@@ -1405,6 +1442,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         &self,
         pat: &Pat<'_>,
         unmentioned_fields: &[(&ty::FieldDef, Ident)],
+        fields: &'tcx [hir::FieldPat<'tcx>],
     ) -> DiagnosticBuilder<'tcx> {
         let field_names = if unmentioned_fields.len() == 1 {
             format!("field `{}`", unmentioned_fields[0].1)
@@ -1424,14 +1462,52 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
             field_names
         );
         err.span_label(pat.span, format!("missing {}", field_names));
-        if self.tcx.sess.teach(&err.get_code().unwrap()) {
-            err.note(
-                "This error indicates that a pattern for a struct fails to specify a \
-                 sub-pattern for every one of the struct's fields. Ensure that each field \
-                 from the struct's definition is mentioned in the pattern, or use `..` to \
-                 ignore unwanted fields.",
-            );
-        }
+        let len = unmentioned_fields.len();
+        let (prefix, postfix, sp) = match fields {
+            [] => match &pat.kind {
+                PatKind::Struct(path, [], false) => {
+                    (" { ", " }", path.span().shrink_to_hi().until(pat.span.shrink_to_hi()))
+                }
+                _ => return err,
+            },
+            [.., field] => (
+                match pat.kind {
+                    PatKind::Struct(_, [_, ..], _) => ", ",
+                    _ => "",
+                },
+                "",
+                field.span.shrink_to_hi(),
+            ),
+        };
+        err.span_suggestion(
+            sp,
+            &format!(
+                "include the missing field{} in the pattern",
+                if len == 1 { "" } else { "s" },
+            ),
+            format!(
+                "{}{}{}",
+                prefix,
+                unmentioned_fields
+                    .iter()
+                    .map(|(_, name)| name.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                postfix,
+            ),
+            Applicability::MachineApplicable,
+        );
+        err.span_suggestion(
+            sp,
+            &format!(
+                "if you don't care about {} missing field{}, you can explicitely ignore {}",
+                if len == 1 { "this" } else { "these" },
+                if len == 1 { "" } else { "s" },
+                if len == 1 { "it" } else { "them" },
+            ),
+            format!("{}..{}", prefix, postfix),
+            Applicability::MachineApplicable,
+        );
         err
     }
 

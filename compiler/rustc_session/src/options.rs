@@ -717,7 +717,7 @@ options! {CodegenOptions, CodegenSetter, basic_codegen_options,
     // This list is in alphabetical order.
     //
     // If you add a new option, please update:
-    // - src/librustc_interface/tests.rs
+    // - compiler/rustc_interface/src/tests.rs
     // - src/doc/rustc/src/codegen-options/index.md
 
     ar: String = (String::new(), parse_string, [UNTRACKED],
@@ -814,7 +814,7 @@ options! {CodegenOptions, CodegenSetter, basic_codegen_options,
     // This list is in alphabetical order.
     //
     // If you add a new option, please update:
-    // - src/librustc_interface/tests.rs
+    // - compiler/rustc_interface/src/tests.rs
     // - src/doc/rustc/src/codegen-options/index.md
 }
 
@@ -825,7 +825,7 @@ options! {DebuggingOptions, DebuggingSetter, basic_debugging_options,
     // This list is in alphabetical order.
     //
     // If you add a new option, please update:
-    // - src/librustc_interface/tests.rs
+    // - compiler/rustc_interface/src/tests.rs
 
     allow_features: Option<Vec<String>> = (None, parse_opt_comma_list, [TRACKED],
         "only allow the listed language features to be enabled in code (space separated)"),
@@ -895,11 +895,6 @@ options! {DebuggingOptions, DebuggingSetter, basic_debugging_options,
         all statements)."),
     emit_stack_sizes: bool = (false, parse_bool, [UNTRACKED],
         "emit a section containing stack size metadata (default: no)"),
-    experimental_coverage: bool = (false, parse_bool, [TRACKED],
-        "enable and extend the `-Z instrument-coverage` function-level coverage \
-        feature, adding additional experimental (likely inaccurate) counters and \
-        code regions (used by `rustc` compiler developers to test new coverage \
-        counter placements) (default: no)"),
     fewer_names: bool = (false, parse_bool, [TRACKED],
         "reduce memory use by retaining fewer names within compilation artifacts (LLVM-IR) \
         (default: no)"),
@@ -909,8 +904,13 @@ options! {DebuggingOptions, DebuggingSetter, basic_debugging_options,
         "force all crates to be `rustc_private` unstable (default: no)"),
     fuel: Option<(String, u64)> = (None, parse_optimization_fuel, [TRACKED],
         "set the optimization fuel quota for a crate"),
+    function_sections: Option<bool> = (None, parse_opt_bool, [TRACKED],
+        "whether each function should go in its own section"),
     graphviz_dark_mode: bool = (false, parse_bool, [UNTRACKED],
         "use dark-themed colors in graphviz output (default: no)"),
+    graphviz_font: String = ("Courier, monospace".to_string(), parse_string, [UNTRACKED],
+        "use the given `fontname` in graphviz output; can be overridden by setting \
+        environment variable `RUSTC_GRAPHVIZ_FONT` (default: `Courier, monospace`)"),
     hir_stats: bool = (false, parse_bool, [UNTRACKED],
         "print some statistics about AST and HIR (default: no)"),
     human_readable_cgu_names: bool = (false, parse_bool, [TRACKED],
@@ -1005,6 +1005,10 @@ options! {DebuggingOptions, DebuggingSetter, basic_debugging_options,
         "a single extra argument to prepend the linker invocation (can be used several times)"),
     pre_link_args: Vec<String> = (Vec::new(), parse_list, [UNTRACKED],
         "extra arguments to prepend to the linker invocation (space separated)"),
+    precise_enum_drop_elaboration: bool = (true, parse_bool, [TRACKED],
+        "use a more precise version of drop elaboration for matches on enums (default: yes). \
+        This results in better codegen, but has caused miscompilations on some tier 2 platforms. \
+        See #77382 and #74551."),
     print_fuel: Option<String> = (None, parse_opt_string, [TRACKED],
         "make rustc print the total optimization fuel used by a crate"),
     print_link_args: bool = (false, parse_bool, [UNTRACKED],
@@ -1076,6 +1080,8 @@ options! {DebuggingOptions, DebuggingSetter, basic_debugging_options,
         "show extended diagnostic help (default: no)"),
     terminal_width: Option<usize> = (None, parse_opt_uint, [UNTRACKED],
         "set the current terminal width"),
+    tune_cpu: Option<String> = (None, parse_opt_string, [TRACKED],
+        "select processor to schedule for (`rustc --print target-cpus` for details)"),
     thinlto: Option<bool> = (None, parse_opt_bool, [TRACKED],
         "enable ThinLTO when possible"),
     // We default to 1 here since we want to behave like
@@ -1112,6 +1118,8 @@ options! {DebuggingOptions, DebuggingSetter, basic_debugging_options,
         `hir,typed` (HIR with types for each node),
         `hir-tree` (dump the raw HIR),
         `mir` (the MIR), or `mir-cfg` (graphviz formatted MIR)"),
+    unsound_mir_opts: bool = (false, parse_bool, [TRACKED],
+        "enable unsound and buggy MIR optimizations (default: no)"),
     unstable_options: bool = (false, parse_bool, [UNTRACKED],
         "adds unstable command line options to rustc interface (default: no)"),
     use_ctors_section: Option<bool> = (None, parse_opt_bool, [TRACKED],

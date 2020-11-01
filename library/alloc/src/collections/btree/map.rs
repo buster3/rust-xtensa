@@ -2,19 +2,25 @@ use core::borrow::Borrow;
 use core::cmp::Ordering;
 use core::fmt::{self, Debug};
 use core::hash::{Hash, Hasher};
-use core::iter::{FromIterator, FusedIterator, Peekable};
+use core::iter::{FromIterator, FusedIterator};
 use core::marker::PhantomData;
 use core::mem::{self, ManuallyDrop};
 use core::ops::{Index, RangeBounds};
 use core::ptr;
 
 use super::borrow::DormantMutRef;
-use super::node::{self, marker, ForceResult::*, Handle, InsertResult::*, NodeRef};
+use super::merge_iter::MergeIterInner;
+use super::node::{self, marker, ForceResult::*, Handle, NodeRef};
 use super::search::{self, SearchResult::*};
 use super::unwrap_unchecked;
 
+mod entry;
+pub use entry::{Entry, OccupiedEntry, VacantEntry};
 use Entry::*;
-use UnderflowResult::*;
+
+/// Minimum number of elements in nodes that are not a root.
+/// We might temporarily have fewer elements during methods.
+pub(super) const MIN_LEN: usize = node::MIN_LEN_AFTER_SPLIT;
 
 /// A map based on a B-Tree.
 ///
@@ -47,7 +53,6 @@ use UnderflowResult::*;
 /// any other key, as determined by the [`Ord`] trait, changes while it is in the map. This is
 /// normally only possible through [`Cell`], [`RefCell`], global state, I/O, or unsafe code.
 ///
-/// [`Ord`]: core::cmp::Ord
 /// [`Cell`]: core::cell::Cell
 /// [`RefCell`]: core::cell::RefCell
 ///
@@ -93,9 +98,10 @@ use UnderflowResult::*;
 /// }
 /// ```
 ///
-/// `BTreeMap` also implements an [`Entry API`](#method.entry), which allows
-/// for more complex methods of getting, setting, updating and removing keys and
-/// their values:
+/// `BTreeMap` also implements an [`Entry API`], which allows for more complex
+/// methods of getting, setting, updating and removing keys and their values:
+///
+/// [`Entry API`]: BTreeMap::entry
 ///
 /// ```
 /// use std::collections::BTreeMap;
@@ -297,14 +303,23 @@ pub struct IntoIter<K, V> {
     length: usize,
 }
 
-#[stable(feature = "collection_debug", since = "1.17.0")]
-impl<K: fmt::Debug, V: fmt::Debug> fmt::Debug for IntoIter<K, V> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl<K, V> IntoIter<K, V> {
+    /// Returns an iterator of references over the remaining items.
+    #[inline]
+    pub(super) fn iter(&self) -> Iter<'_, K, V> {
         let range = Range {
             front: self.front.as_ref().map(|f| f.reborrow()),
             back: self.back.as_ref().map(|b| b.reborrow()),
         };
-        f.debug_list().entries(range).finish()
+
+        Iter { range: range, length: self.length }
+    }
+}
+
+#[stable(feature = "collection_debug", since = "1.17.0")]
+impl<K: fmt::Debug, V: fmt::Debug> fmt::Debug for IntoIter<K, V> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_list().entries(self.iter()).finish()
     }
 }
 
@@ -351,9 +366,15 @@ impl<K, V: fmt::Debug> fmt::Debug for Values<'_, K, V> {
 ///
 /// [`values_mut`]: BTreeMap::values_mut
 #[stable(feature = "map_values_mut", since = "1.10.0")]
-#[derive(Debug)]
 pub struct ValuesMut<'a, K: 'a, V: 'a> {
     inner: IterMut<'a, K, V>,
+}
+
+#[stable(feature = "map_values_mut", since = "1.10.0")]
+impl<K, V: fmt::Debug> fmt::Debug for ValuesMut<'_, K, V> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_list().entries(self.inner.iter().map(|(_, val)| val)).finish()
+    }
 }
 
 /// An owning iterator over the keys of a `BTreeMap`.
@@ -363,9 +384,15 @@ pub struct ValuesMut<'a, K: 'a, V: 'a> {
 ///
 /// [`into_keys`]: BTreeMap::into_keys
 #[unstable(feature = "map_into_keys_values", issue = "75294")]
-#[derive(Debug)]
 pub struct IntoKeys<K, V> {
     inner: IntoIter<K, V>,
+}
+
+#[unstable(feature = "map_into_keys_values", issue = "75294")]
+impl<K: fmt::Debug, V> fmt::Debug for IntoKeys<K, V> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_list().entries(self.inner.iter().map(|(key, _)| key)).finish()
+    }
 }
 
 /// An owning iterator over the values of a `BTreeMap`.
@@ -375,9 +402,15 @@ pub struct IntoKeys<K, V> {
 ///
 /// [`into_values`]: BTreeMap::into_values
 #[unstable(feature = "map_into_keys_values", issue = "75294")]
-#[derive(Debug)]
 pub struct IntoValues<K, V> {
     inner: IntoIter<K, V>,
+}
+
+#[unstable(feature = "map_into_keys_values", issue = "75294")]
+impl<K, V: fmt::Debug> fmt::Debug for IntoValues<K, V> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_list().entries(self.inner.iter().map(|(_, val)| val)).finish()
+    }
 }
 
 /// An iterator over a sub-range of entries in a `BTreeMap`.
@@ -425,78 +458,8 @@ impl<K: fmt::Debug, V: fmt::Debug> fmt::Debug for RangeMut<'_, K, V> {
     }
 }
 
-/// A view into a single entry in a map, which may either be vacant or occupied.
-///
-/// This `enum` is constructed from the [`entry`] method on [`BTreeMap`].
-///
-/// [`entry`]: BTreeMap::entry
-#[stable(feature = "rust1", since = "1.0.0")]
-pub enum Entry<'a, K: 'a, V: 'a> {
-    /// A vacant entry.
-    #[stable(feature = "rust1", since = "1.0.0")]
-    Vacant(#[stable(feature = "rust1", since = "1.0.0")] VacantEntry<'a, K, V>),
-
-    /// An occupied entry.
-    #[stable(feature = "rust1", since = "1.0.0")]
-    Occupied(#[stable(feature = "rust1", since = "1.0.0")] OccupiedEntry<'a, K, V>),
-}
-
-#[stable(feature = "debug_btree_map", since = "1.12.0")]
-impl<K: Debug + Ord, V: Debug> Debug for Entry<'_, K, V> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match *self {
-            Vacant(ref v) => f.debug_tuple("Entry").field(v).finish(),
-            Occupied(ref o) => f.debug_tuple("Entry").field(o).finish(),
-        }
-    }
-}
-
-/// A view into a vacant entry in a `BTreeMap`.
-/// It is part of the [`Entry`] enum.
-///
-/// [`Entry`]: enum.Entry.html
-#[stable(feature = "rust1", since = "1.0.0")]
-pub struct VacantEntry<'a, K: 'a, V: 'a> {
-    key: K,
-    handle: Handle<NodeRef<marker::Mut<'a>, K, V, marker::Leaf>, marker::Edge>,
-    dormant_map: DormantMutRef<'a, BTreeMap<K, V>>,
-
-    // Be invariant in `K` and `V`
-    _marker: PhantomData<&'a mut (K, V)>,
-}
-
-#[stable(feature = "debug_btree_map", since = "1.12.0")]
-impl<K: Debug + Ord, V> Debug for VacantEntry<'_, K, V> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_tuple("VacantEntry").field(self.key()).finish()
-    }
-}
-
-/// A view into an occupied entry in a `BTreeMap`.
-/// It is part of the [`Entry`] enum.
-///
-/// [`Entry`]: enum.Entry.html
-#[stable(feature = "rust1", since = "1.0.0")]
-pub struct OccupiedEntry<'a, K: 'a, V: 'a> {
-    handle: Handle<NodeRef<marker::Mut<'a>, K, V, marker::LeafOrInternal>, marker::KV>,
-    dormant_map: DormantMutRef<'a, BTreeMap<K, V>>,
-
-    // Be invariant in `K` and `V`
-    _marker: PhantomData<&'a mut (K, V)>,
-}
-
-#[stable(feature = "debug_btree_map", since = "1.12.0")]
-impl<K: Debug + Ord, V: Debug> Debug for OccupiedEntry<'_, K, V> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("OccupiedEntry").field("key", self.key()).field("value", self.get()).finish()
-    }
-}
-
 // An iterator for merging two sorted sequences into one
-struct MergeIter<K, V, I: Iterator<Item = (K, V)>> {
-    left: Peekable<I>,
-    right: Peekable<I>,
-}
+struct MergeIter<K, V, I: Iterator<Item = (K, V)>>(MergeIterInner<I>);
 
 impl<K: Ord, V> BTreeMap<K, V> {
     /// Makes a new empty BTreeMap.
@@ -948,7 +911,7 @@ impl<K: Ord, V> BTreeMap<K, V> {
         // First, we merge `self` and `other` into a sorted sequence in linear time.
         let self_iter = mem::take(self).into_iter();
         let other_iter = mem::take(other).into_iter();
-        let iter = MergeIter { left: self_iter.peekable(), right: other_iter.peekable() };
+        let iter = MergeIter(MergeIterInner::new(self_iter, other_iter));
 
         // Second, we build a tree from the sorted sequence in linear time.
         self.from_sorted_iter(iter);
@@ -1133,13 +1096,13 @@ impl<K: Ord, V> BTreeMap<K, V> {
             // Check if right-most child is underfull.
             let mut last_edge = internal.last_edge();
             let right_child_len = last_edge.reborrow().descend().len();
-            if right_child_len < node::MIN_LEN {
+            if right_child_len < MIN_LEN {
                 // We need to steal.
                 let mut last_kv = match last_edge.left_kv() {
                     Ok(left) => left,
                     Err(_) => unreachable!(),
                 };
-                last_kv.bulk_steal_left(node::MIN_LEN - right_child_len);
+                last_kv.bulk_steal_left(MIN_LEN - right_child_len);
                 last_edge = last_kv.right_edge();
             }
 
@@ -1191,40 +1154,8 @@ impl<K: Ord, V> BTreeMap<K, V> {
 
         let mut right = Self::new();
         let right_root = Self::ensure_is_owned(&mut right.root);
-        for _ in 0..left_root.height() {
-            right_root.push_internal_level();
-        }
 
-        {
-            let mut left_node = left_root.node_as_mut();
-            let mut right_node = right_root.node_as_mut();
-
-            loop {
-                let mut split_edge = match search::search_node(left_node, key) {
-                    // key is going to the right tree
-                    Found(handle) => handle.left_edge(),
-                    GoDown(handle) => handle,
-                };
-
-                split_edge.move_suffix(&mut right_node);
-
-                match (split_edge.force(), right_node.force()) {
-                    (Internal(edge), Internal(node)) => {
-                        left_node = edge.descend();
-                        right_node = node.first_edge().descend();
-                    }
-                    (Leaf(_), Leaf(_)) => {
-                        break;
-                    }
-                    _ => {
-                        unreachable!();
-                    }
-                }
-            }
-        }
-
-        left_root.fix_right_border();
-        right_root.fix_left_border();
+        left_root.split_off(right_root, key);
 
         if left_root.height() < right_root.height() {
             self.length = left_root.node_as_ref().calc_length();
@@ -1469,6 +1400,14 @@ impl<K, V> ExactSizeIterator for IterMut<'_, K, V> {
 #[stable(feature = "fused", since = "1.26.0")]
 impl<K, V> FusedIterator for IterMut<'_, K, V> {}
 
+impl<'a, K, V> IterMut<'a, K, V> {
+    /// Returns an iterator of references over the remaining items.
+    #[inline]
+    pub(super) fn iter(&self) -> Iter<'_, K, V> {
+        Iter { range: self.range.iter(), length: self.length }
+    }
+}
+
 #[stable(feature = "rust1", since = "1.0.0")]
 impl<K, V> IntoIterator for BTreeMap<K, V> {
     type Item = (K, V);
@@ -1670,10 +1609,14 @@ where
 /// Most of the implementation of DrainFilter, independent of the type
 /// of the predicate, thus also serving for BTreeSet::DrainFilter.
 pub(super) struct DrainFilterInner<'a, K: 'a, V: 'a> {
+    /// Reference to the length field in the borrowed map, updated live.
     length: &'a mut usize,
-    // dormant_root is wrapped in an Option to be able to `take` it.
+    /// Burried reference to the root field in the borrowed map.
+    /// Wrapped in `Option` to allow drop handler to `take` it.
     dormant_root: Option<DormantMutRef<'a, node::Root<K, V>>>,
-    // cur_leaf_edge is wrapped in an Option because maps without root lack a leaf edge.
+    /// Contains a leaf edge preceding the next element to be returned, or the last leaf edge.
+    /// Empty if the map has no root, if iteration went beyond the last leaf edge,
+    /// or if a panic occurred in the predicate.
     cur_leaf_edge: Option<Handle<NodeRef<marker::Mut<'a>, K, V, marker::Leaf>, marker::Edge>>,
 }
 
@@ -1719,7 +1662,7 @@ impl<'a, K: 'a, V: 'a> DrainFilterInner<'a, K, V> {
     /// Allow Debug implementations to predict the next element.
     pub(super) fn peek(&self) -> Option<(&K, &V)> {
         let edge = self.cur_leaf_edge.as_ref()?;
-        edge.reborrow().next_kv().ok().map(|kv| kv.into_kv())
+        edge.reborrow().next_kv().ok().map(Handle::into_kv)
     }
 
     /// Implementation of a typical `DrainFilter::next` method, given the predicate.
@@ -1748,6 +1691,10 @@ impl<'a, K: 'a, V: 'a> DrainFilterInner<'a, K, V> {
 
     /// Implementation of a typical `DrainFilter::size_hint` method.
     pub(super) fn size_hint(&self) -> (usize, Option<usize>) {
+        // In most of the btree iterators, `self.length` is the number of elements
+        // yet to be visited. Here, it includes elements that were visited and that
+        // the predicate decided not to drain. Making this upper bound more accurate
+        // requires maintaining an extra field and is not worth while.
         (0, Some(*self.length))
     }
 }
@@ -1952,6 +1899,15 @@ impl<'a, K, V> RangeMut<'a, K, V> {
 
     unsafe fn next_unchecked(&mut self) -> (&'a K, &'a mut V) {
         unsafe { unwrap_unchecked(self.front.as_mut()).next_unchecked() }
+    }
+
+    /// Returns an iterator of references over the remaining items.
+    #[inline]
+    pub(super) fn iter(&self) -> Range<'_, K, V> {
+        Range {
+            front: self.front.as_ref().map(|f| f.reborrow()),
+            back: self.back.as_ref().map(|b| b.reborrow()),
+        }
     }
 }
 
@@ -2232,7 +2188,8 @@ impl<K, V> BTreeMap<K, V> {
     /// assert_eq!(a.len(), 1);
     /// ```
     #[stable(feature = "rust1", since = "1.0.0")]
-    pub fn len(&self) -> usize {
+    #[rustc_const_unstable(feature = "const_btree_new", issue = "71835")]
+    pub const fn len(&self) -> usize {
         self.length
     }
 
@@ -2251,7 +2208,8 @@ impl<K, V> BTreeMap<K, V> {
     /// assert!(!a.is_empty());
     /// ```
     #[stable(feature = "rust1", since = "1.0.0")]
-    pub fn is_empty(&self) -> bool {
+    #[rustc_const_unstable(feature = "const_btree_new", issue = "71835")]
+    pub const fn is_empty(&self) -> bool {
         self.len() == 0
     }
 
@@ -2262,617 +2220,16 @@ impl<K, V> BTreeMap<K, V> {
     }
 }
 
-impl<'a, K: Ord, V> Entry<'a, K, V> {
-    /// Ensures a value is in the entry by inserting the default if empty, and returns
-    /// a mutable reference to the value in the entry.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use std::collections::BTreeMap;
-    ///
-    /// let mut map: BTreeMap<&str, usize> = BTreeMap::new();
-    /// map.entry("poneyland").or_insert(12);
-    ///
-    /// assert_eq!(map["poneyland"], 12);
-    /// ```
-    #[stable(feature = "rust1", since = "1.0.0")]
-    pub fn or_insert(self, default: V) -> &'a mut V {
-        match self {
-            Occupied(entry) => entry.into_mut(),
-            Vacant(entry) => entry.insert(default),
-        }
-    }
-
-    /// Ensures a value is in the entry by inserting the result of the default function if empty,
-    /// and returns a mutable reference to the value in the entry.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use std::collections::BTreeMap;
-    ///
-    /// let mut map: BTreeMap<&str, String> = BTreeMap::new();
-    /// let s = "hoho".to_string();
-    ///
-    /// map.entry("poneyland").or_insert_with(|| s);
-    ///
-    /// assert_eq!(map["poneyland"], "hoho".to_string());
-    /// ```
-    #[stable(feature = "rust1", since = "1.0.0")]
-    pub fn or_insert_with<F: FnOnce() -> V>(self, default: F) -> &'a mut V {
-        match self {
-            Occupied(entry) => entry.into_mut(),
-            Vacant(entry) => entry.insert(default()),
-        }
-    }
-
-    #[unstable(feature = "or_insert_with_key", issue = "71024")]
-    /// Ensures a value is in the entry by inserting, if empty, the result of the default function,
-    /// which takes the key as its argument, and returns a mutable reference to the value in the
-    /// entry.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// #![feature(or_insert_with_key)]
-    /// use std::collections::BTreeMap;
-    ///
-    /// let mut map: BTreeMap<&str, usize> = BTreeMap::new();
-    ///
-    /// map.entry("poneyland").or_insert_with_key(|key| key.chars().count());
-    ///
-    /// assert_eq!(map["poneyland"], 9);
-    /// ```
-    #[inline]
-    pub fn or_insert_with_key<F: FnOnce(&K) -> V>(self, default: F) -> &'a mut V {
-        match self {
-            Occupied(entry) => entry.into_mut(),
-            Vacant(entry) => {
-                let value = default(entry.key());
-                entry.insert(value)
-            }
-        }
-    }
-
-    /// Returns a reference to this entry's key.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use std::collections::BTreeMap;
-    ///
-    /// let mut map: BTreeMap<&str, usize> = BTreeMap::new();
-    /// assert_eq!(map.entry("poneyland").key(), &"poneyland");
-    /// ```
-    #[stable(feature = "map_entry_keys", since = "1.10.0")]
-    pub fn key(&self) -> &K {
-        match *self {
-            Occupied(ref entry) => entry.key(),
-            Vacant(ref entry) => entry.key(),
-        }
-    }
-
-    /// Provides in-place mutable access to an occupied entry before any
-    /// potential inserts into the map.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use std::collections::BTreeMap;
-    ///
-    /// let mut map: BTreeMap<&str, usize> = BTreeMap::new();
-    ///
-    /// map.entry("poneyland")
-    ///    .and_modify(|e| { *e += 1 })
-    ///    .or_insert(42);
-    /// assert_eq!(map["poneyland"], 42);
-    ///
-    /// map.entry("poneyland")
-    ///    .and_modify(|e| { *e += 1 })
-    ///    .or_insert(42);
-    /// assert_eq!(map["poneyland"], 43);
-    /// ```
-    #[stable(feature = "entry_and_modify", since = "1.26.0")]
-    pub fn and_modify<F>(self, f: F) -> Self
-    where
-        F: FnOnce(&mut V),
-    {
-        match self {
-            Occupied(mut entry) => {
-                f(entry.get_mut());
-                Occupied(entry)
-            }
-            Vacant(entry) => Vacant(entry),
-        }
-    }
-}
-
-impl<'a, K: Ord, V: Default> Entry<'a, K, V> {
-    #[stable(feature = "entry_or_default", since = "1.28.0")]
-    /// Ensures a value is in the entry by inserting the default value if empty,
-    /// and returns a mutable reference to the value in the entry.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use std::collections::BTreeMap;
-    ///
-    /// let mut map: BTreeMap<&str, Option<usize>> = BTreeMap::new();
-    /// map.entry("poneyland").or_default();
-    ///
-    /// assert_eq!(map["poneyland"], None);
-    /// ```
-    pub fn or_default(self) -> &'a mut V {
-        match self {
-            Occupied(entry) => entry.into_mut(),
-            Vacant(entry) => entry.insert(Default::default()),
-        }
-    }
-}
-
-impl<'a, K: Ord, V> VacantEntry<'a, K, V> {
-    /// Gets a reference to the key that would be used when inserting a value
-    /// through the VacantEntry.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use std::collections::BTreeMap;
-    ///
-    /// let mut map: BTreeMap<&str, usize> = BTreeMap::new();
-    /// assert_eq!(map.entry("poneyland").key(), &"poneyland");
-    /// ```
-    #[stable(feature = "map_entry_keys", since = "1.10.0")]
-    pub fn key(&self) -> &K {
-        &self.key
-    }
-
-    /// Take ownership of the key.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use std::collections::BTreeMap;
-    /// use std::collections::btree_map::Entry;
-    ///
-    /// let mut map: BTreeMap<&str, usize> = BTreeMap::new();
-    ///
-    /// if let Entry::Vacant(v) = map.entry("poneyland") {
-    ///     v.into_key();
-    /// }
-    /// ```
-    #[stable(feature = "map_entry_recover_keys2", since = "1.12.0")]
-    pub fn into_key(self) -> K {
-        self.key
-    }
-
-    /// Sets the value of the entry with the `VacantEntry`'s key,
-    /// and returns a mutable reference to it.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use std::collections::BTreeMap;
-    /// use std::collections::btree_map::Entry;
-    ///
-    /// let mut map: BTreeMap<&str, u32> = BTreeMap::new();
-    ///
-    /// if let Entry::Vacant(o) = map.entry("poneyland") {
-    ///     o.insert(37);
-    /// }
-    /// assert_eq!(map["poneyland"], 37);
-    /// ```
-    #[stable(feature = "rust1", since = "1.0.0")]
-    pub fn insert(self, value: V) -> &'a mut V {
-        let out_ptr = match self.handle.insert_recursing(self.key, value) {
-            (Fit(_), val_ptr) => {
-                // Safety: We have consumed self.handle and the handle returned.
-                let map = unsafe { self.dormant_map.awaken() };
-                map.length += 1;
-                val_ptr
-            }
-            (Split(ins), val_ptr) => {
-                drop(ins.left);
-                // Safety: We have consumed self.handle and the reference returned.
-                let map = unsafe { self.dormant_map.awaken() };
-                let root = map.root.as_mut().unwrap();
-                root.push_internal_level().push(ins.k, ins.v, ins.right);
-                map.length += 1;
-                val_ptr
-            }
-        };
-        // Now that we have finished growing the tree using borrowed references,
-        // dereference the pointer to a part of it, that we picked up along the way.
-        unsafe { &mut *out_ptr }
-    }
-}
-
-impl<'a, K: Ord, V> OccupiedEntry<'a, K, V> {
-    /// Gets a reference to the key in the entry.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use std::collections::BTreeMap;
-    ///
-    /// let mut map: BTreeMap<&str, usize> = BTreeMap::new();
-    /// map.entry("poneyland").or_insert(12);
-    /// assert_eq!(map.entry("poneyland").key(), &"poneyland");
-    /// ```
-    #[stable(feature = "map_entry_keys", since = "1.10.0")]
-    pub fn key(&self) -> &K {
-        self.handle.reborrow().into_kv().0
-    }
-
-    /// Take ownership of the key and value from the map.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use std::collections::BTreeMap;
-    /// use std::collections::btree_map::Entry;
-    ///
-    /// let mut map: BTreeMap<&str, usize> = BTreeMap::new();
-    /// map.entry("poneyland").or_insert(12);
-    ///
-    /// if let Entry::Occupied(o) = map.entry("poneyland") {
-    ///     // We delete the entry from the map.
-    ///     o.remove_entry();
-    /// }
-    ///
-    /// // If now try to get the value, it will panic:
-    /// // println!("{}", map["poneyland"]);
-    /// ```
-    #[stable(feature = "map_entry_recover_keys2", since = "1.12.0")]
-    pub fn remove_entry(self) -> (K, V) {
-        self.remove_kv()
-    }
-
-    /// Gets a reference to the value in the entry.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use std::collections::BTreeMap;
-    /// use std::collections::btree_map::Entry;
-    ///
-    /// let mut map: BTreeMap<&str, usize> = BTreeMap::new();
-    /// map.entry("poneyland").or_insert(12);
-    ///
-    /// if let Entry::Occupied(o) = map.entry("poneyland") {
-    ///     assert_eq!(o.get(), &12);
-    /// }
-    /// ```
-    #[stable(feature = "rust1", since = "1.0.0")]
-    pub fn get(&self) -> &V {
-        self.handle.reborrow().into_kv().1
-    }
-
-    /// Gets a mutable reference to the value in the entry.
-    ///
-    /// If you need a reference to the `OccupiedEntry` that may outlive the
-    /// destruction of the `Entry` value, see [`into_mut`].
-    ///
-    /// [`into_mut`]: #method.into_mut
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use std::collections::BTreeMap;
-    /// use std::collections::btree_map::Entry;
-    ///
-    /// let mut map: BTreeMap<&str, usize> = BTreeMap::new();
-    /// map.entry("poneyland").or_insert(12);
-    ///
-    /// assert_eq!(map["poneyland"], 12);
-    /// if let Entry::Occupied(mut o) = map.entry("poneyland") {
-    ///     *o.get_mut() += 10;
-    ///     assert_eq!(*o.get(), 22);
-    ///
-    ///     // We can use the same Entry multiple times.
-    ///     *o.get_mut() += 2;
-    /// }
-    /// assert_eq!(map["poneyland"], 24);
-    /// ```
-    #[stable(feature = "rust1", since = "1.0.0")]
-    pub fn get_mut(&mut self) -> &mut V {
-        self.handle.kv_mut().1
-    }
-
-    /// Converts the entry into a mutable reference to its value.
-    ///
-    /// If you need multiple references to the `OccupiedEntry`, see [`get_mut`].
-    ///
-    /// [`get_mut`]: #method.get_mut
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use std::collections::BTreeMap;
-    /// use std::collections::btree_map::Entry;
-    ///
-    /// let mut map: BTreeMap<&str, usize> = BTreeMap::new();
-    /// map.entry("poneyland").or_insert(12);
-    ///
-    /// assert_eq!(map["poneyland"], 12);
-    /// if let Entry::Occupied(o) = map.entry("poneyland") {
-    ///     *o.into_mut() += 10;
-    /// }
-    /// assert_eq!(map["poneyland"], 22);
-    /// ```
-    #[stable(feature = "rust1", since = "1.0.0")]
-    pub fn into_mut(self) -> &'a mut V {
-        self.handle.into_val_mut()
-    }
-
-    /// Sets the value of the entry with the `OccupiedEntry`'s key,
-    /// and returns the entry's old value.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use std::collections::BTreeMap;
-    /// use std::collections::btree_map::Entry;
-    ///
-    /// let mut map: BTreeMap<&str, usize> = BTreeMap::new();
-    /// map.entry("poneyland").or_insert(12);
-    ///
-    /// if let Entry::Occupied(mut o) = map.entry("poneyland") {
-    ///     assert_eq!(o.insert(15), 12);
-    /// }
-    /// assert_eq!(map["poneyland"], 15);
-    /// ```
-    #[stable(feature = "rust1", since = "1.0.0")]
-    pub fn insert(&mut self, value: V) -> V {
-        mem::replace(self.get_mut(), value)
-    }
-
-    /// Takes the value of the entry out of the map, and returns it.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use std::collections::BTreeMap;
-    /// use std::collections::btree_map::Entry;
-    ///
-    /// let mut map: BTreeMap<&str, usize> = BTreeMap::new();
-    /// map.entry("poneyland").or_insert(12);
-    ///
-    /// if let Entry::Occupied(o) = map.entry("poneyland") {
-    ///     assert_eq!(o.remove(), 12);
-    /// }
-    /// // If we try to get "poneyland"'s value, it'll panic:
-    /// // println!("{}", map["poneyland"]);
-    /// ```
-    #[stable(feature = "rust1", since = "1.0.0")]
-    pub fn remove(self) -> V {
-        self.remove_kv().1
-    }
-
-    // Body of `remove_entry`, separate to keep the above implementations short.
-    fn remove_kv(self) -> (K, V) {
-        let mut emptied_internal_root = false;
-        let (old_kv, _) = self.handle.remove_kv_tracking(|| emptied_internal_root = true);
-        // SAFETY: we consumed the intermediate root borrow, `self.handle`.
-        let map = unsafe { self.dormant_map.awaken() };
-        map.length -= 1;
-        if emptied_internal_root {
-            let root = map.root.as_mut().unwrap();
-            root.pop_internal_level();
-        }
-        old_kv
-    }
-}
-
-impl<'a, K: 'a, V: 'a> Handle<NodeRef<marker::Mut<'a>, K, V, marker::LeafOrInternal>, marker::KV> {
-    /// Removes a key/value-pair from the map, and returns that pair, as well as
-    /// the leaf edge corresponding to that former pair.
-    fn remove_kv_tracking<F: FnOnce()>(
-        self,
-        handle_emptied_internal_root: F,
-    ) -> ((K, V), Handle<NodeRef<marker::Mut<'a>, K, V, marker::Leaf>, marker::Edge>) {
-        let (old_kv, mut pos, was_internal) = match self.force() {
-            Leaf(leaf) => {
-                let (old_kv, pos) = leaf.remove();
-                (old_kv, pos, false)
-            }
-            Internal(mut internal) => {
-                // Replace the location freed in the internal node with an
-                // adjacent KV, and remove that adjacent KV from its leaf.
-                // Always choose the adjacent KV on the left side because
-                // it is typically faster to pop an element from the end
-                // of the KV arrays without needing to shift other elements.
-
-                let key_loc = internal.kv_mut().0 as *mut K;
-                let val_loc = internal.kv_mut().1 as *mut V;
-
-                let to_remove = internal.left_edge().descend().last_leaf_edge().left_kv().ok();
-                let to_remove = unsafe { unwrap_unchecked(to_remove) };
-
-                let (kv, pos) = to_remove.remove();
-
-                let old_key = unsafe { mem::replace(&mut *key_loc, kv.0) };
-                let old_val = unsafe { mem::replace(&mut *val_loc, kv.1) };
-
-                ((old_key, old_val), pos, true)
-            }
-        };
-
-        // Handle underflow
-        let mut cur_node = unsafe { ptr::read(&pos).into_node().forget_type() };
-        let mut at_leaf = true;
-        while cur_node.len() < node::MIN_LEN {
-            match handle_underfull_node(cur_node) {
-                AtRoot => break,
-                Merged(edge, merged_with_left, offset) => {
-                    // If we merged with our right sibling then our tracked
-                    // position has not changed. However if we merged with our
-                    // left sibling then our tracked position is now dangling.
-                    if at_leaf && merged_with_left {
-                        let idx = pos.idx() + offset;
-                        let node = match unsafe { ptr::read(&edge).descend().force() } {
-                            Leaf(leaf) => leaf,
-                            Internal(_) => unreachable!(),
-                        };
-                        pos = unsafe { Handle::new_edge(node, idx) };
-                    }
-
-                    let parent = edge.into_node();
-                    if parent.len() == 0 {
-                        // The parent that was just emptied must be the root,
-                        // because nodes on a lower level would not have been
-                        // left with a single child.
-                        handle_emptied_internal_root();
-                        break;
-                    } else {
-                        cur_node = parent.forget_type();
-                        at_leaf = false;
-                    }
-                }
-                Stole(stole_from_left) => {
-                    // Adjust the tracked position if we stole from a left sibling
-                    if stole_from_left && at_leaf {
-                        // SAFETY: This is safe since we just added an element to our node.
-                        unsafe {
-                            pos.move_next_unchecked();
-                        }
-                    }
-                    break;
-                }
-            }
-        }
-
-        // If we deleted from an internal node then we need to compensate for
-        // the earlier swap and adjust the tracked position to point to the
-        // next element.
-        if was_internal {
-            pos = unsafe { unwrap_unchecked(pos.next_kv().ok()).next_leaf_edge() };
-        }
-
-        (old_kv, pos)
-    }
-}
-
-impl<K, V> node::Root<K, V> {
-    /// Removes empty levels on the top, but keep an empty leaf if the entire tree is empty.
-    fn fix_top(&mut self) {
-        while self.height() > 0 && self.node_as_ref().len() == 0 {
-            self.pop_internal_level();
-        }
-    }
-
-    fn fix_right_border(&mut self) {
-        self.fix_top();
-
-        {
-            let mut cur_node = self.node_as_mut();
-
-            while let Internal(node) = cur_node.force() {
-                let mut last_kv = node.last_kv();
-
-                if last_kv.can_merge() {
-                    cur_node = last_kv.merge().descend();
-                } else {
-                    let right_len = last_kv.reborrow().right_edge().descend().len();
-                    // `MINLEN + 1` to avoid readjust if merge happens on the next level.
-                    if right_len < node::MIN_LEN + 1 {
-                        last_kv.bulk_steal_left(node::MIN_LEN + 1 - right_len);
-                    }
-                    cur_node = last_kv.right_edge().descend();
-                }
-            }
-        }
-
-        self.fix_top();
-    }
-
-    /// The symmetric clone of `fix_right_border`.
-    fn fix_left_border(&mut self) {
-        self.fix_top();
-
-        {
-            let mut cur_node = self.node_as_mut();
-
-            while let Internal(node) = cur_node.force() {
-                let mut first_kv = node.first_kv();
-
-                if first_kv.can_merge() {
-                    cur_node = first_kv.merge().descend();
-                } else {
-                    let left_len = first_kv.reborrow().left_edge().descend().len();
-                    if left_len < node::MIN_LEN + 1 {
-                        first_kv.bulk_steal_right(node::MIN_LEN + 1 - left_len);
-                    }
-                    cur_node = first_kv.left_edge().descend();
-                }
-            }
-        }
-
-        self.fix_top();
-    }
-}
-
-enum UnderflowResult<'a, K, V> {
-    AtRoot,
-    Merged(Handle<NodeRef<marker::Mut<'a>, K, V, marker::Internal>, marker::Edge>, bool, usize),
-    Stole(bool),
-}
-
-fn handle_underfull_node<'a, K: 'a, V: 'a>(
-    node: NodeRef<marker::Mut<'a>, K, V, marker::LeafOrInternal>,
-) -> UnderflowResult<'_, K, V> {
-    let parent = match node.ascend() {
-        Ok(parent) => parent,
-        Err(_) => return AtRoot,
-    };
-
-    // Prefer the left KV if it exists. Merging with the left side is faster,
-    // since merging happens towards the left and `node` has fewer elements.
-    // Stealing from the left side is faster, since we can pop from the end of
-    // the KV arrays.
-    let (is_left, mut handle) = match parent.left_kv() {
-        Ok(left) => (true, left),
-        Err(parent) => {
-            let right = unsafe { unwrap_unchecked(parent.right_kv().ok()) };
-            (false, right)
-        }
-    };
-
-    if handle.can_merge() {
-        let offset = if is_left { handle.reborrow().left_edge().descend().len() + 1 } else { 0 };
-        Merged(handle.merge(), is_left, offset)
-    } else {
-        if is_left {
-            handle.steal_left();
-        } else {
-            handle.steal_right();
-        }
-        Stole(is_left)
-    }
-}
-
-impl<K: Ord, V, I: Iterator<Item = (K, V)>> Iterator for MergeIter<K, V, I> {
+impl<K: Ord, V, I> Iterator for MergeIter<K, V, I>
+where
+    I: Iterator<Item = (K, V)> + ExactSizeIterator + FusedIterator,
+{
     type Item = (K, V);
 
+    /// If two keys are equal, returns the key/value-pair from the right source.
     fn next(&mut self) -> Option<(K, V)> {
-        let res = match (self.left.peek(), self.right.peek()) {
-            (Some(&(ref left_key, _)), Some(&(ref right_key, _))) => left_key.cmp(right_key),
-            (Some(_), None) => Ordering::Less,
-            (None, Some(_)) => Ordering::Greater,
-            (None, None) => return None,
-        };
-
-        // Check which elements comes first and only advance the corresponding iterator.
-        // If two keys are equal, take the value from `right`.
-        match res {
-            Ordering::Less => self.left.next(),
-            Ordering::Greater => self.right.next(),
-            Ordering::Equal => {
-                self.left.next();
-                self.right.next()
-            }
-        }
+        let (a_next, b_next) = self.0.nexts(|a: &(K, V), b: &(K, V)| K::cmp(&a.0, &b.0));
+        b_next.or(a_next)
     }
 }
 

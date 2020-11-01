@@ -21,7 +21,7 @@ use rustc_middle::infer::canonical::{Canonical, CanonicalVarValues};
 use rustc_middle::infer::unify_key::{ConstVarValue, ConstVariableValue};
 use rustc_middle::infer::unify_key::{ConstVariableOrigin, ConstVariableOriginKind, ToType};
 use rustc_middle::mir;
-use rustc_middle::mir::interpret::ConstEvalResult;
+use rustc_middle::mir::interpret::EvalToConstValueResult;
 use rustc_middle::traits::select;
 use rustc_middle::ty::error::{ExpectedFound, TypeError, UnconstrainedNumeric};
 use rustc_middle::ty::fold::{TypeFoldable, TypeFolder};
@@ -113,13 +113,6 @@ impl Default for RegionckMode {
 }
 
 impl RegionckMode {
-    pub fn suppressed(self) -> bool {
-        match self {
-            Self::Solve => false,
-            Self::Erase { suppress_errors } => suppress_errors,
-        }
-    }
-
     /// Indicates that the MIR borrowck will repeat these region
     /// checks, so we should ignore errors if NLL is (unconditionally)
     /// enabled.
@@ -351,11 +344,6 @@ pub struct InferCtxt<'a, 'tcx> {
     universe: Cell<ty::UniverseIndex>,
 }
 
-/// A map returned by `replace_bound_vars_with_placeholders()`
-/// indicating the placeholder region that each late-bound region was
-/// replaced with.
-pub type PlaceholderMap<'tcx> = BTreeMap<ty::BoundRegion, ty::Region<'tcx>>;
-
 /// See the `error_reporting` module for more details.
 #[derive(Clone, Debug, PartialEq, Eq, TypeFoldable)]
 pub enum ValuePairs<'tcx> {
@@ -424,15 +412,6 @@ pub enum SubregionOrigin<'tcx> {
 // `SubregionOrigin` is used a lot. Make sure it doesn't unintentionally get bigger.
 #[cfg(target_arch = "x86_64")]
 static_assert_size!(SubregionOrigin<'_>, 32);
-
-/// Places that type/region parameters can appear.
-#[derive(Clone, Copy, Debug)]
-pub enum ParameterOrigin {
-    Path,               // foo::bar
-    MethodCall,         // foo.bar() <-- parameters on impl providing bar()
-    OverloadedOperator, // a + b when overloaded
-    OverloadedDeref,    // *a when overloaded
-}
 
 /// Times when we replace late-bound regions with variables:
 #[derive(Clone, Copy, Debug)]
@@ -511,21 +490,6 @@ pub enum NLLRegionVariableOrigin {
         /// rather than blaming the source of the constraint C.
         from_forall: bool,
     },
-}
-
-impl NLLRegionVariableOrigin {
-    pub fn is_universal(self) -> bool {
-        match self {
-            NLLRegionVariableOrigin::FreeRegion => true,
-            NLLRegionVariableOrigin::Placeholder(..) => true,
-            NLLRegionVariableOrigin::Existential { .. } => false,
-            NLLRegionVariableOrigin::RootEmptyRegion => false,
-        }
-    }
-
-    pub fn is_existential(self) -> bool {
-        !self.is_universal()
-    }
 }
 
 // FIXME(eddyb) investigate overlap between this and `TyOrConstInferVar`.
@@ -714,8 +678,6 @@ impl<'a, 'tcx> InferCtxt<'a, 'tcx> {
 
     pub fn unsolved_variables(&self) -> Vec<Ty<'tcx>> {
         let mut inner = self.inner.borrow_mut();
-        // FIXME(const_generics): should there be an equivalent function for const variables?
-
         let mut vars: Vec<Ty<'_>> = inner
             .type_variables()
             .unsolved_variables()
@@ -992,7 +954,7 @@ impl<'a, 'tcx> InferCtxt<'a, 'tcx> {
         }
 
         Some(self.commit_if_ok(|_snapshot| {
-            let (ty::SubtypePredicate { a_is_expected, a, b }, _) =
+            let ty::SubtypePredicate { a_is_expected, a, b } =
                 self.replace_bound_vars_with_placeholders(&predicate);
 
             let ok = self.at(cause, param_env).sub_exp(a_is_expected, a, b)?;
@@ -1007,7 +969,7 @@ impl<'a, 'tcx> InferCtxt<'a, 'tcx> {
         predicate: ty::PolyRegionOutlivesPredicate<'tcx>,
     ) -> UnitResult<'tcx> {
         self.commit_if_ok(|_snapshot| {
-            let (ty::OutlivesPredicate(r_a, r_b), _) =
+            let ty::OutlivesPredicate(r_a, r_b) =
                 self.replace_bound_vars_with_placeholders(&predicate);
             let origin = SubregionOrigin::from_obligation_cause(cause, || {
                 RelateRegionParamBound(cause.span)
@@ -1163,7 +1125,10 @@ impl<'a, 'tcx> InferCtxt<'a, 'tcx> {
             }
             GenericParamDefKind::Const { .. } => {
                 let origin = ConstVariableOrigin {
-                    kind: ConstVariableOriginKind::ConstParameterDefinition(param.name),
+                    kind: ConstVariableOriginKind::ConstParameterDefinition(
+                        param.name,
+                        param.def_id,
+                    ),
                     span,
                 };
                 let const_var_id =
@@ -1275,7 +1240,6 @@ impl<'a, 'tcx> InferCtxt<'a, 'tcx> {
     }
 
     /// Gives temporary access to the region constraint data.
-    #[allow(non_camel_case_types)] // bug with impl trait
     pub fn with_region_constraints<R>(
         &self,
         op: impl FnOnce(&RegionConstraintData<'tcx>) -> R,
@@ -1542,7 +1506,7 @@ impl<'a, 'tcx> InferCtxt<'a, 'tcx> {
         substs: SubstsRef<'tcx>,
         promoted: Option<mir::Promoted>,
         span: Option<Span>,
-    ) -> ConstEvalResult<'tcx> {
+    ) -> EvalToConstValueResult<'tcx> {
         let mut original_values = OriginalQueryValues::default();
         let canonical = self.canonicalize_query(&(param_env, substs), &mut original_values);
 

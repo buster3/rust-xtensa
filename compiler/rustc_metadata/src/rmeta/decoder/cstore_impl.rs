@@ -8,6 +8,7 @@ use rustc_ast as ast;
 use rustc_ast::expand::allocator::AllocatorKind;
 use rustc_data_structures::svh::Svh;
 use rustc_hir as hir;
+use rustc_hir::def::DefKind;
 use rustc_hir::def_id::{CrateNum, DefId, DefIdMap, CRATE_DEF_INDEX, LOCAL_CRATE};
 use rustc_hir::definitions::{DefKey, DefPath, DefPathHash};
 use rustc_middle::hir::exports::Export;
@@ -89,11 +90,12 @@ provide! { <'tcx> tcx, def_id, other, cdata,
     explicit_predicates_of => { cdata.get_explicit_predicates(def_id.index, tcx) }
     inferred_outlives_of => { cdata.get_inferred_outlives(def_id.index, tcx) }
     super_predicates_of => { cdata.get_super_predicates(def_id.index, tcx) }
+    explicit_item_bounds => { cdata.get_explicit_item_bounds(def_id.index, tcx) }
     trait_def => { cdata.get_trait_def(def_id.index, tcx.sess) }
     adt_def => { cdata.get_adt_def(def_id.index, tcx) }
     adt_destructor => {
         let _ = cdata;
-        tcx.calculate_dtor(def_id, &mut |_,_| Ok(()))
+        tcx.calculate_dtor(def_id, |_,_| Ok(()))
     }
     variances_of => { tcx.arena.alloc_from_iter(cdata.get_item_variances(def_id.index)) }
     associated_item_def_ids => {
@@ -112,6 +114,7 @@ provide! { <'tcx> tcx, def_id, other, cdata,
     }
     optimized_mir => { tcx.arena.alloc(cdata.get_optimized_mir(tcx, def_id.index)) }
     promoted_mir => { tcx.arena.alloc(cdata.get_promoted_mir(tcx, def_id.index)) }
+    mir_abstract_const => { cdata.get_mir_abstract_const(tcx, def_id.index) }
     unused_generic_params => { cdata.get_unused_generic_params(def_id.index) }
     mir_const_qualif => { cdata.mir_const_qualif(def_id.index) }
     fn_sig => { cdata.fn_sig(def_id.index, tcx) }
@@ -178,8 +181,11 @@ provide! { <'tcx> tcx, def_id, other, cdata,
         })
     }
     proc_macro_decls_static => {
-        cdata.root.proc_macro_decls_static.map(|index| {
-            DefId { krate: def_id.krate, index }
+        cdata.root.proc_macro_data.as_ref().map(|data| {
+            DefId {
+                krate: def_id.krate,
+                index: data.proc_macro_decls_static,
+            }
         })
     }
     crate_disambiguator => { cdata.root.disambiguator }
@@ -214,10 +220,7 @@ provide! { <'tcx> tcx, def_id, other, cdata,
     missing_lang_items => { cdata.get_missing_lang_items(tcx) }
 
     missing_extern_crate_item => {
-        let r = match *cdata.extern_crate.borrow() {
-            Some(extern_crate) if !extern_crate.is_direct() => true,
-            _ => false,
-        };
+        let r = matches!(*cdata.extern_crate.borrow(), Some(extern_crate) if !extern_crate.is_direct());
         r
     }
 
@@ -234,6 +237,7 @@ provide! { <'tcx> tcx, def_id, other, cdata,
     }
 
     crate_extern_paths => { cdata.source().paths().cloned().collect() }
+    expn_that_defined => { cdata.get_expn_that_defined(def_id.index, tcx.sess) }
 }
 
 pub fn provide(providers: &mut Providers) {
@@ -247,9 +251,11 @@ pub fn provide(providers: &mut Providers) {
             }
             _ => false,
         },
-        is_statically_included_foreign_item: |tcx, id| match tcx.native_library_kind(id) {
-            Some(NativeLibKind::StaticBundle | NativeLibKind::StaticNoBundle) => true,
-            _ => false,
+        is_statically_included_foreign_item: |tcx, id| {
+            matches!(
+                tcx.native_library_kind(id),
+                Some(NativeLibKind::StaticBundle | NativeLibKind::StaticNoBundle)
+            )
         },
         native_library_kind: |tcx, id| {
             tcx.native_libraries(id.krate)
@@ -479,6 +485,10 @@ impl CrateStore for CStore {
     /// `DefId` refers to.
     fn def_key(&self, def: DefId) -> DefKey {
         self.get_crate_data(def.krate).def_key(def.index)
+    }
+
+    fn def_kind(&self, def: DefId) -> DefKind {
+        self.get_crate_data(def.krate).def_kind(def.index)
     }
 
     fn def_path(&self, def: DefId) -> DefPath {

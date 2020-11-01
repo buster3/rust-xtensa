@@ -12,6 +12,7 @@ use rustc_data_structures::fx::FxHashSet;
 use rustc_data_structures::impl_stable_hash_via_hash;
 use rustc_data_structures::stable_hasher::{HashStable, StableHasher};
 
+use rustc_target::abi::{Align, TargetDataLayout};
 use rustc_target::spec::{Target, TargetTriple};
 
 use crate::parse::CrateConfig;
@@ -32,11 +33,6 @@ use std::fmt;
 use std::iter::{self, FromIterator};
 use std::path::{Path, PathBuf};
 use std::str::{self, FromStr};
-
-pub struct Config {
-    pub target: Target,
-    pub ptr_width: u32,
-}
 
 bitflags! {
     #[derive(Default, Encodable, Decodable)]
@@ -739,21 +735,24 @@ pub const fn default_lib_output() -> CrateType {
 }
 
 pub fn default_configuration(sess: &Session) -> CrateConfig {
-    let end = &sess.target.target.target_endian;
-    let arch = &sess.target.target.arch;
-    let wordsz = &sess.target.target.target_pointer_width;
-    let os = &sess.target.target.target_os;
-    let env = &sess.target.target.target_env;
-    let vendor = &sess.target.target.target_vendor;
-    let min_atomic_width = sess.target.target.min_atomic_width();
-    let max_atomic_width = sess.target.target.max_atomic_width();
-    let atomic_cas = sess.target.target.options.atomic_cas;
+    let end = &sess.target.target_endian;
+    let arch = &sess.target.arch;
+    let wordsz = sess.target.pointer_width.to_string();
+    let os = &sess.target.target_os;
+    let env = &sess.target.target_env;
+    let vendor = &sess.target.target_vendor;
+    let min_atomic_width = sess.target.min_atomic_width();
+    let max_atomic_width = sess.target.max_atomic_width();
+    let atomic_cas = sess.target.options.atomic_cas;
+    let layout = TargetDataLayout::parse(&sess.target).unwrap_or_else(|err| {
+        sess.fatal(&err);
+    });
 
     let mut ret = FxHashSet::default();
     ret.reserve(6); // the minimum number of insertions
     // Target bindings.
     ret.insert((sym::target_os, Some(Symbol::intern(os))));
-    if let Some(ref fam) = sess.target.target.options.target_family {
+    if let Some(ref fam) = sess.target.options.target_family {
         ret.insert((sym::target_family, Some(Symbol::intern(fam))));
         if fam == "windows" {
             ret.insert((sym::windows, None));
@@ -763,24 +762,33 @@ pub fn default_configuration(sess: &Session) -> CrateConfig {
     }
     ret.insert((sym::target_arch, Some(Symbol::intern(arch))));
     ret.insert((sym::target_endian, Some(Symbol::intern(end))));
-    ret.insert((sym::target_pointer_width, Some(Symbol::intern(wordsz))));
+    ret.insert((sym::target_pointer_width, Some(Symbol::intern(&wordsz))));
     ret.insert((sym::target_env, Some(Symbol::intern(env))));
     ret.insert((sym::target_vendor, Some(Symbol::intern(vendor))));
-    if sess.target.target.options.has_elf_tls {
+    if sess.target.options.has_elf_tls {
         ret.insert((sym::target_thread_local, None));
     }
-    for &i in &[8, 16, 32, 64, 128] {
+    for &(i, align) in &[
+        (8, layout.i8_align.abi),
+        (16, layout.i16_align.abi),
+        (32, layout.i32_align.abi),
+        (64, layout.i64_align.abi),
+        (128, layout.i128_align.abi),
+    ] {
         if i >= min_atomic_width && i <= max_atomic_width {
-            let mut insert_atomic = |s| {
+            let mut insert_atomic = |s, align: Align| {
                 ret.insert((sym::target_has_atomic_load_store, Some(Symbol::intern(s))));
                 if atomic_cas {
                     ret.insert((sym::target_has_atomic, Some(Symbol::intern(s))));
                 }
+                if align.bits() == i {
+                    ret.insert((sym::target_has_atomic_equal_alignment, Some(Symbol::intern(s))));
+                }
             };
             let s = i.to_string();
-            insert_atomic(&s);
-            if &s == wordsz {
-                insert_atomic("ptr");
+            insert_atomic(&s, align);
+            if s == wordsz {
+                insert_atomic("ptr", layout.pointer_align.abi);
             }
         }
     }
@@ -818,10 +826,11 @@ pub fn build_configuration(sess: &Session, mut user_cfg: CrateConfig) -> CrateCo
     user_cfg
 }
 
-pub fn build_target_config(opts: &Options, error_format: ErrorOutputType) -> Config {
-    let target = Target::search(&opts.target_triple).unwrap_or_else(|e| {
+pub fn build_target_config(opts: &Options, target_override: Option<Target>) -> Target {
+    let target_result = target_override.map_or_else(|| Target::search(&opts.target_triple), Ok);
+    let target = target_result.unwrap_or_else(|e| {
         early_error(
-            error_format,
+            opts.error_format,
             &format!(
                 "Error loading target specification: {}. \
             Use `--print target-list` for a list of built-in targets",
@@ -830,21 +839,18 @@ pub fn build_target_config(opts: &Options, error_format: ErrorOutputType) -> Con
         )
     });
 
-    let ptr_width = match &target.target_pointer_width[..] {
-        "16" => 16,
-        "32" => 32,
-        "64" => 64,
-        w => early_error(
-            error_format,
+    if !matches!(target.pointer_width, 16 | 32 | 64) {
+        early_error(
+            opts.error_format,
             &format!(
                 "target specification was invalid: \
              unrecognized target-pointer-width {}",
-                w
+                target.pointer_width
             ),
-        ),
-    };
+        )
+    }
 
-    Config { target, ptr_width }
+    target
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
@@ -1742,10 +1748,6 @@ pub fn build_session_options(matches: &getopts::Matches) -> Options {
         );
     }
 
-    if debugging_opts.experimental_coverage {
-        debugging_opts.instrument_coverage = true;
-    }
-
     if debugging_opts.instrument_coverage {
         if cg.profile_generate.enabled() || cg.profile_use.is_some() {
             early_error(
@@ -1760,6 +1762,10 @@ pub fn build_session_options(matches: &getopts::Matches) -> Options {
         // multiple runs, including some changes to source code; so mangled names must be consistent
         // across compilations.
         debugging_opts.symbol_mangling_version = SymbolManglingVersion::V0;
+    }
+
+    if let Ok(graphviz_font) = std::env::var("RUSTC_GRAPHVIZ_FONT") {
+        debugging_opts.graphviz_font = graphviz_font;
     }
 
     if !cg.embed_bitcode {
@@ -2051,10 +2057,7 @@ impl PpMode {
 
     pub fn needs_analysis(&self) -> bool {
         use PpMode::*;
-        match *self {
-            PpmMir | PpmMirCFG => true,
-            _ => false,
-        }
+        matches!(*self, PpmMir | PpmMirCFG)
     }
 }
 

@@ -31,6 +31,29 @@ use crate::sys_common::{self, AsInner, FromInner, IntoInner};
 use crate::time::Duration;
 
 #[cfg(any(
+    target_os = "android",
+    target_os = "linux",
+    target_os = "dragonfly",
+    target_os = "freebsd",
+    target_os = "ios",
+    target_os = "macos",
+    target_os = "openbsd"
+))]
+use crate::os::unix::ucred;
+
+#[unstable(feature = "peer_credentials_unix_socket", issue = "42839", reason = "unstable")]
+#[cfg(any(
+    target_os = "android",
+    target_os = "linux",
+    target_os = "dragonfly",
+    target_os = "freebsd",
+    target_os = "ios",
+    target_os = "macos",
+    target_os = "openbsd"
+))]
+pub use ucred::UCred;
+
+#[cfg(any(
     target_os = "linux",
     target_os = "android",
     target_os = "dragonfly",
@@ -405,6 +428,34 @@ impl UnixStream {
         SocketAddr::new(|addr, len| unsafe { libc::getpeername(*self.0.as_inner(), addr, len) })
     }
 
+    /// Gets the peer credentials for this Unix domain socket.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// #![feature(peer_credentials_unix_socket)]
+    /// use std::os::unix::net::UnixStream;
+    ///
+    /// fn main() -> std::io::Result<()> {
+    ///     let socket = UnixStream::connect("/tmp/sock")?;
+    ///     let peer_cred = socket.peer_cred().expect("Couldn't get peer credentials");
+    ///     Ok(())
+    /// }
+    /// ```
+    #[unstable(feature = "peer_credentials_unix_socket", issue = "42839", reason = "unstable")]
+    #[cfg(any(
+        target_os = "android",
+        target_os = "linux",
+        target_os = "dragonfly",
+        target_os = "freebsd",
+        target_os = "ios",
+        target_os = "macos",
+        target_os = "openbsd"
+    ))]
+    pub fn peer_cred(&self) -> io::Result<UCred> {
+        ucred::peer_cred(self)
+    }
+
     /// Sets the read timeout for the socket.
     ///
     /// If the provided value is [`None`], then [`read`] calls will block
@@ -616,7 +667,7 @@ impl UnixStream {
     ///     Ok(())
     /// }
     /// ```
-    #[unstable(feature = "unix_socket_peek", issue = "none")]
+    #[unstable(feature = "unix_socket_peek", issue = "76923")]
     pub fn peek(&self, buf: &mut [u8]) -> io::Result<usize> {
         self.0.peek(buf)
     }
@@ -1657,7 +1708,7 @@ impl UnixDatagram {
     ///     Ok(())
     /// }
     /// ```
-    #[unstable(feature = "unix_socket_peek", issue = "none")]
+    #[unstable(feature = "unix_socket_peek", issue = "76923")]
     pub fn peek(&self, buf: &mut [u8]) -> io::Result<usize> {
         self.0.peek(buf)
     }
@@ -1689,7 +1740,7 @@ impl UnixDatagram {
     ///     Ok(())
     /// }
     /// ```
-    #[unstable(feature = "unix_socket_peek", issue = "none")]
+    #[unstable(feature = "unix_socket_peek", issue = "76923")]
     pub fn peek_from(&self, buf: &mut [u8]) -> io::Result<(usize, SocketAddr)> {
         self.recv_from_flags(buf, libc::MSG_PEEK)
     }

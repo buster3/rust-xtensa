@@ -9,10 +9,41 @@
 # a custom configuration file can also be specified with `--config` to the build
 # system.
 
+# Keeps track of the last version of `x.py` used.
+# If it does not match the version that is currently running,
+# `x.py` will prompt you to update it and read the changelog.
+# See `src/bootstrap/CHANGELOG.md` for more information.
+changelog-seen = 2
+
+# =============================================================================
+# Global Settings
+# =============================================================================
+
+# Use different pre-set defaults than the global defaults.
+#
+# See `src/bootstrap/defaults` for more information.
+# Note that this has no default value (x.py uses the defaults in `config.toml.example`).
+#profile = <none>
+
 # =============================================================================
 # Tweaking how LLVM is compiled
 # =============================================================================
 [llvm]
+
+# Whether to use Rust CI built LLVM instead of locally building it.
+#
+# Unless you're developing for a target where Rust CI doesn't build a compiler
+# toolchain or changing LLVM locally, you probably want to set this to true.
+#
+# It's currently false by default due to being newly added; please file bugs if
+# enabling this did not work for you on x86_64-unknown-linux-gnu.
+# Other target triples are currently not supported; see #77084.
+#
+# We also currently only support this when building LLVM for the build triple.
+#
+# Note that many of the LLVM options are not currently supported for
+# downloading. Currently only the "assertions" option can be toggled.
+#download-ci-llvm = false
 
 # Indicates whether LLVM rebuild should be skipped when running bootstrap. If
 # this is `false` then the compiler's LLVM will be rebuilt whenever the built
@@ -111,6 +142,23 @@
 # General build configuration options
 # =============================================================================
 [build]
+# The default stage to use for the `doc` subcommand
+#doc-stage = 0
+
+# The default stage to use for the `build` subcommand
+#build-stage = 1
+
+# The default stage to use for the `test` subcommand
+#test-stage = 1
+
+# The default stage to use for the `dist` subcommand
+#dist-stage = 2
+
+# The default stage to use for the `install` subcommand
+#install-stage = 2
+
+# The default stage to use for the `bench` subcommand
+#bench-stage = 2
 
 # Build triple for the original snapshot compiler. This must be a compiler that
 # nightlies are already produced for. The current platform must be able to run
@@ -322,13 +370,23 @@
 # binary, otherwise they are omitted.
 #
 # Defaults to rust.debug value
-#debug-assertions = false
+#debug-assertions = rust.debug (boolean)
 
 # Whether or not debug assertions are enabled for the standard library.
 # Overrides the `debug-assertions` option, if defined.
 #
 # Defaults to rust.debug-assertions value
-#debug-assertions-std = false
+#debug-assertions-std = rust.debug-assertions (boolean)
+
+# Whether or not to leave debug! and trace! calls in the rust binary.
+# Overrides the `debug-assertions` option, if defined.
+#
+# Defaults to rust.debug-assertions value
+#
+# If you see a message from `tracing` saying
+# `max_level_info` is enabled and means logging won't be shown,
+# set this value to `true`.
+#debug-logging = rust.debug-assertions (boolean)
 
 # Debuginfo level for most of Rust code, corresponds to the `-C debuginfo=N` option of `rustc`.
 # `0` - no debug info
@@ -372,6 +430,7 @@
 #incremental = false
 
 # Build a multi-threaded rustc
+# FIXME(#75760): Some UI tests fail when this option is enabled.
 #parallel-compiler = false
 
 # The default linker that will be hard-coded into the generated compiler for
@@ -419,7 +478,7 @@
 
 # This is an array of the codegen backends that will be compiled for the rustc
 # that's being compiled. The default is to only build the LLVM codegen backend,
-# and currently the only standard option supported is `"llvm"`
+# and currently the only standard options supported are `"llvm"` and `"cranelift"`.
 #codegen-backends = ["llvm"]
 
 # Indicates whether LLD will be compiled and made available in the sysroot for
@@ -468,7 +527,8 @@
 #test-compare-mode = false
 
 # Use LLVM libunwind as the implementation for Rust's unwinder.
-#llvm-libunwind = false
+# Accepted values are 'in-tree' (formerly true), 'system' or 'no' (formerly false).
+#llvm-libunwind = 'no'
 
 # Enable Windows Control Flow Guard checks in the standard library.
 # This only applies from stage 1 onwards, and only for Windows targets.

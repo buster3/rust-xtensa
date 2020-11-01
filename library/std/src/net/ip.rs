@@ -148,8 +148,9 @@ impl IpAddr {
     /// assert_eq!(IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)).is_unspecified(), true);
     /// assert_eq!(IpAddr::V6(Ipv6Addr::new(0, 0, 0, 0, 0, 0, 0, 0)).is_unspecified(), true);
     /// ```
+    #[rustc_const_unstable(feature = "const_ip", issue = "76205")]
     #[stable(feature = "ip_shared", since = "1.12.0")]
-    pub fn is_unspecified(&self) -> bool {
+    pub const fn is_unspecified(&self) -> bool {
         match self {
             IpAddr::V4(ip) => ip.is_unspecified(),
             IpAddr::V6(ip) => ip.is_unspecified(),
@@ -169,8 +170,9 @@ impl IpAddr {
     /// assert_eq!(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)).is_loopback(), true);
     /// assert_eq!(IpAddr::V6(Ipv6Addr::new(0, 0, 0, 0, 0, 0, 0, 0x1)).is_loopback(), true);
     /// ```
+    #[rustc_const_unstable(feature = "const_ip", issue = "76205")]
     #[stable(feature = "ip_shared", since = "1.12.0")]
-    pub fn is_loopback(&self) -> bool {
+    pub const fn is_loopback(&self) -> bool {
         match self {
             IpAddr::V4(ip) => ip.is_loopback(),
             IpAddr::V6(ip) => ip.is_loopback(),
@@ -192,7 +194,8 @@ impl IpAddr {
     /// assert_eq!(IpAddr::V4(Ipv4Addr::new(80, 9, 12, 3)).is_global(), true);
     /// assert_eq!(IpAddr::V6(Ipv6Addr::new(0, 0, 0x1c9, 0, 0, 0xafc8, 0, 0x1)).is_global(), true);
     /// ```
-    pub fn is_global(&self) -> bool {
+    #[rustc_const_unstable(feature = "const_ip", issue = "76205")]
+    pub const fn is_global(&self) -> bool {
         match self {
             IpAddr::V4(ip) => ip.is_global(),
             IpAddr::V6(ip) => ip.is_global(),
@@ -212,8 +215,9 @@ impl IpAddr {
     /// assert_eq!(IpAddr::V4(Ipv4Addr::new(224, 254, 0, 0)).is_multicast(), true);
     /// assert_eq!(IpAddr::V6(Ipv6Addr::new(0xff00, 0, 0, 0, 0, 0, 0, 0)).is_multicast(), true);
     /// ```
+    #[rustc_const_unstable(feature = "const_ip", issue = "76205")]
     #[stable(feature = "ip_shared", since = "1.12.0")]
-    pub fn is_multicast(&self) -> bool {
+    pub const fn is_multicast(&self) -> bool {
         match self {
             IpAddr::V4(ip) => ip.is_multicast(),
             IpAddr::V6(ip) => ip.is_multicast(),
@@ -238,7 +242,8 @@ impl IpAddr {
     ///     true
     /// );
     /// ```
-    pub fn is_documentation(&self) -> bool {
+    #[rustc_const_unstable(feature = "const_ip", issue = "76205")]
+    pub const fn is_documentation(&self) -> bool {
         match self {
             IpAddr::V4(ip) => ip.is_documentation(),
             IpAddr::V6(ip) => ip.is_documentation(),
@@ -451,10 +456,7 @@ impl Ipv4Addr {
     #[rustc_const_unstable(feature = "const_ipv4", issue = "76205")]
     #[stable(since = "1.7.0", feature = "ip_17")]
     pub const fn is_link_local(&self) -> bool {
-        match self.octets() {
-            [169, 254, ..] => true,
-            _ => false,
-        }
+        matches!(self.octets(), [169, 254, ..])
     }
 
     /// Returns [`true`] if the address appears to be globally routable.
@@ -1041,7 +1043,8 @@ impl Ipv6Addr {
     /// ```
     #[stable(feature = "rust1", since = "1.0.0")]
     #[rustc_const_stable(feature = "const_ipv6", since = "1.32.0")]
-    #[allow_internal_unstable(const_fn_transmute)]
+    #[cfg_attr(not(bootstrap), rustc_allow_const_fn_unstable(const_fn_transmute))]
+    #[cfg_attr(bootstrap, allow_internal_unstable(const_fn_transmute))]
     pub const fn new(a: u16, b: u16, c: u16, d: u16, e: u16, f: u16, g: u16, h: u16) -> Ipv6Addr {
         let addr16 = [
             a.to_be(),
@@ -1257,10 +1260,7 @@ impl Ipv6Addr {
     /// [RFC 4291 errata 4406]: https://www.rfc-editor.org/errata/eid4406
     #[rustc_const_unstable(feature = "const_ipv6", issue = "76205")]
     pub const fn is_unicast_link_local_strict(&self) -> bool {
-        (self.segments()[0] & 0xffff) == 0xfe80
-            && (self.segments()[1] & 0xffff) == 0
-            && (self.segments()[2] & 0xffff) == 0
-            && (self.segments()[3] & 0xffff) == 0
+        matches!(self.segments(), [0xfe80, 0, 0, 0, ..])
     }
 
     /// Returns [`true`] if the address is a unicast link-local address (`fe80::/10`).

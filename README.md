@@ -35,8 +35,7 @@ standard library, and documentation.
 
 **Note: this README is for _users_ rather than _contributors_.
 If you wish to _contribute_ to the compiler, you should read the
-[Getting Started][gettingstarted] of the rustc-dev-guide instead of this
-section.**
+[Getting Started][gettingstarted] section of the rustc-dev-guide instead.**
 
 ## Quick Start
 
@@ -70,8 +69,8 @@ by running `./x.py --help` or reading the [rustc dev guide][rustcguidebuild].
 2. Clone the [source] with `git`:
 
    ```sh
-   $ git clone https://github.com/rust-lang/rust.git
-   $ cd rust
+   git clone https://github.com/rust-lang/rust.git
+   cd rust
    ```
 
 [source]: https://github.com/rust-lang/rust
@@ -83,7 +82,7 @@ by running `./x.py --help` or reading the [rustc dev guide][rustcguidebuild].
     Copy the default `config.toml.example` to `config.toml` to get started.
 
     ```sh
-    $ cp config.toml.example config.toml
+    cp config.toml.example config.toml
     ```
 
     If you plan to use `x.py install` to create an installation, it is recommended
@@ -94,7 +93,7 @@ by running `./x.py --help` or reading the [rustc dev guide][rustcguidebuild].
 4. Build and install:
 
     ```sh
-    $ ./x.py build && ./x.py install
+    ./x.py build && ./x.py install
     ```
 
     When complete, `./x.py install` will place several programs into
@@ -132,7 +131,7 @@ build.
 
    ```sh
    # Update package mirrors (may be needed if you have a fresh install of MSYS2)
-   $ pacman -Sy pacman-mirrors
+   pacman -Sy pacman-mirrors
 
    # Install build tools needed for Rust. If you're building a 32-bit compiler,
    # then replace "x86_64" below with "i686". If you've already got git, python,
@@ -140,7 +139,7 @@ build.
    # that it is important that you do **not** use the 'python2', 'cmake' and 'ninja'
    # packages from the 'msys2' subsystem. The build has historically been known
    # to fail with these packages.
-   $ pacman -S git \
+   pacman -S git \
                make \
                diffutils \
                tar \
@@ -153,7 +152,7 @@ build.
 4. Navigate to Rust's source code (or clone it), then build it:
 
    ```sh
-   $ ./x.py build && ./x.py install
+   ./x.py build && ./x.py install
    ```
 
 #### MSVC
@@ -171,7 +170,7 @@ With these dependencies installed, you can build the compiler in a `cmd.exe`
 shell with:
 
 ```sh
-> python x.py build
+python x.py build
 ```
 
 Currently, building Rust only works with some known versions of Visual Studio. If
@@ -180,8 +179,8 @@ you may need to force rustbuild to use an older version. This can be done
 by manually calling the appropriate vcvars file before running the bootstrap.
 
 ```batch
-> CALL "C:\Program Files (x86)\Microsoft Visual Studio\2019\Community\VC\Auxiliary\Build\vcvars64.bat"
-> python x.py build
+CALL "C:\Program Files (x86)\Microsoft Visual Studio\2019\Community\VC\Auxiliary\Build\vcvars64.bat"
+python x.py build
 ```
 
 #### Specifying an ABI
@@ -207,8 +206,8 @@ While it's not the recommended build system, this project also provides a
 configure script and makefile (the latter of which just invokes `x.py`).
 
 ```sh
-$ ./configure
-$ make && sudo make install
+./configure
+make && sudo make install
 ```
 
 When using the configure script, the generated `config.mk` file may override the
@@ -220,7 +219,7 @@ When using the configure script, the generated `config.mk` file may override the
 If you’d like to build the documentation, it’s almost the same:
 
 ```sh
-$ ./x.py doc
+./x.py doc
 ```
 
 The generated documentation will appear under `doc` in the `build` directory for

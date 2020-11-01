@@ -115,7 +115,6 @@ fn get_symbol_hash<'tcx>(
         }
 
         // also include any type parameters (for generic items)
-        assert!(!substs.has_erasable_regions());
         substs.hash_stable(&mut hcx, &mut hasher);
 
         if let Some(instantiating_crate) = instantiating_crate {
@@ -316,7 +315,8 @@ impl Printer<'tcx> for SymbolPrinter<'tcx> {
             self.path.finalize_pending_component();
         }
 
-        self.write_str(&disambiguated_data.data.as_symbol().as_str())?;
+        write!(self, "{}", disambiguated_data.data)?;
+
         Ok(self)
     }
     fn path_generic_args(
@@ -326,10 +326,8 @@ impl Printer<'tcx> for SymbolPrinter<'tcx> {
     ) -> Result<Self::Path, Self::Error> {
         self = print_prefix(self)?;
 
-        let args = args.iter().cloned().filter(|arg| match arg.unpack() {
-            GenericArgKind::Lifetime(_) => false,
-            _ => true,
-        });
+        let args =
+            args.iter().cloned().filter(|arg| !matches!(arg.unpack(), GenericArgKind::Lifetime(_)));
 
         if args.clone().next().is_some() {
             self.generic_delimiters(|cx| cx.comma_sep(args))

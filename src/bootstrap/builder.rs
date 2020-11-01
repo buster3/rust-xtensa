@@ -172,15 +172,7 @@ impl StepDescription {
         }
 
         // Determine the targets participating in this rule.
-        let targets = if self.only_hosts {
-            if builder.config.skip_only_host_steps {
-                return; // don't run anything
-            } else {
-                &builder.hosts
-            }
-        } else {
-            &builder.targets
-        };
+        let targets = if self.only_hosts { &builder.hosts } else { &builder.targets };
 
         for target in targets {
             let run = RunConfig { builder, path: pathset.path(builder), target: *target };
@@ -201,36 +193,36 @@ impl StepDescription {
             );
         }
 
-        if paths.is_empty() {
-            for (desc, should_run) in v.iter().zip(should_runs) {
+        if paths.is_empty() || builder.config.include_default_paths {
+            for (desc, should_run) in v.iter().zip(&should_runs) {
                 if desc.default && should_run.is_really_default {
                     for pathset in &should_run.paths {
                         desc.maybe_run(builder, pathset);
                     }
                 }
             }
-        } else {
-            for path in paths {
-                // strip CurDir prefix if present
-                let path = match path.strip_prefix(".") {
-                    Ok(p) => p,
-                    Err(_) => path,
-                };
+        }
 
-                let mut attempted_run = false;
-                for (desc, should_run) in v.iter().zip(&should_runs) {
-                    if let Some(suite) = should_run.is_suite_path(path) {
-                        attempted_run = true;
-                        desc.maybe_run(builder, suite);
-                    } else if let Some(pathset) = should_run.pathset_for_path(path) {
-                        attempted_run = true;
-                        desc.maybe_run(builder, pathset);
-                    }
-                }
+        for path in paths {
+            // strip CurDir prefix if present
+            let path = match path.strip_prefix(".") {
+                Ok(p) => p,
+                Err(_) => path,
+            };
 
-                if !attempted_run {
-                    panic!("error: no rules matched {}", path.display());
+            let mut attempted_run = false;
+            for (desc, should_run) in v.iter().zip(&should_runs) {
+                if let Some(suite) = should_run.is_suite_path(path) {
+                    attempted_run = true;
+                    desc.maybe_run(builder, suite);
+                } else if let Some(pathset) = should_run.pathset_for_path(path) {
+                    attempted_run = true;
+                    desc.maybe_run(builder, pathset);
                 }
+            }
+
+            if !attempted_run {
+                panic!("error: no rules matched {}", path.display());
             }
         }
     }
@@ -352,6 +344,7 @@ impl<'a> Builder<'a> {
             Kind::Build => describe!(
                 compile::Std,
                 compile::Rustc,
+                compile::CodegenBackend,
                 compile::StartupObjects,
                 tool::BuildManifest,
                 tool::Rustbook,
@@ -378,9 +371,14 @@ impl<'a> Builder<'a> {
                 tool::CargoMiri,
                 native::Lld
             ),
-            Kind::Check | Kind::Clippy | Kind::Fix | Kind::Format => {
-                describe!(check::Std, check::Rustc, check::Rustdoc, check::Clippy, check::Bootstrap)
-            }
+            Kind::Check | Kind::Clippy | Kind::Fix | Kind::Format => describe!(
+                check::Std,
+                check::Rustc,
+                check::Rustdoc,
+                check::CodegenBackend,
+                check::Clippy,
+                check::Bootstrap
+            ),
             Kind::Test => describe!(
                 crate::toolstate::ToolStateCheck,
                 test::ExpandYamlAnchors,
@@ -470,6 +468,7 @@ impl<'a> Builder<'a> {
                 dist::LlvmTools,
                 dist::RustDev,
                 dist::Extended,
+                dist::BuildManifest,
                 dist::HashSign
             ),
             Kind::Install => describe!(
@@ -485,7 +484,7 @@ impl<'a> Builder<'a> {
                 install::Src,
                 install::Rustc
             ),
-            Kind::Run => describe!(run::ExpandYamlAnchors,),
+            Kind::Run => describe!(run::ExpandYamlAnchors, run::BuildManifest),
         }
     }
 
@@ -526,23 +525,9 @@ impl<'a> Builder<'a> {
     }
 
     fn new_internal(build: &Build, kind: Kind, paths: Vec<PathBuf>) -> Builder<'_> {
-        let top_stage = if let Some(explicit_stage) = build.config.stage {
-            explicit_stage
-        } else {
-            // See https://github.com/rust-lang/compiler-team/issues/326
-            match kind {
-                Kind::Doc => 0,
-                Kind::Build | Kind::Test => 1,
-                Kind::Bench | Kind::Dist | Kind::Install => 2,
-                // These are all bootstrap tools, which don't depend on the compiler.
-                // The stage we pass shouldn't matter, but use 0 just in case.
-                Kind::Check | Kind::Clippy | Kind::Fix | Kind::Run | Kind::Format => 0,
-            }
-        };
-
         Builder {
             build,
-            top_stage,
+            top_stage: build.config.stage,
             kind,
             cache: Cache::new(),
             stack: RefCell::new(Vec::new()),
@@ -554,7 +539,7 @@ impl<'a> Builder<'a> {
     pub fn new(build: &Build) -> Builder<'_> {
         let (kind, paths) = match build.config.cmd {
             Subcommand::Build { ref paths } => (Kind::Build, &paths[..]),
-            Subcommand::Check { ref paths } => (Kind::Check, &paths[..]),
+            Subcommand::Check { ref paths, all_targets: _ } => (Kind::Check, &paths[..]),
             Subcommand::Clippy { ref paths } => (Kind::Clippy, &paths[..]),
             Subcommand::Fix { ref paths } => (Kind::Fix, &paths[..]),
             Subcommand::Doc { ref paths, .. } => (Kind::Doc, &paths[..]),
@@ -563,23 +548,12 @@ impl<'a> Builder<'a> {
             Subcommand::Dist { ref paths } => (Kind::Dist, &paths[..]),
             Subcommand::Install { ref paths } => (Kind::Install, &paths[..]),
             Subcommand::Run { ref paths } => (Kind::Run, &paths[..]),
-            Subcommand::Format { .. } | Subcommand::Clean { .. } => panic!(),
+            Subcommand::Format { .. } | Subcommand::Clean { .. } | Subcommand::Setup { .. } => {
+                panic!()
+            }
         };
 
-        let this = Self::new_internal(build, kind, paths.to_owned());
-
-        // CI should always run stage 2 builds, unless it specifically states otherwise
-        #[cfg(not(test))]
-        if build.config.stage.is_none() && build.ci_env != crate::CiEnv::None {
-            match kind {
-                Kind::Test | Kind::Doc | Kind::Build | Kind::Bench | Kind::Dist | Kind::Install => {
-                    assert_eq!(this.top_stage, 2)
-                }
-                Kind::Check | Kind::Clippy | Kind::Fix | Kind::Run | Kind::Format => {}
-            }
-        }
-
-        this
+        Self::new_internal(build, kind, paths.to_owned())
     }
 
     pub fn execute_cli(&self) {
@@ -662,6 +636,10 @@ impl<'a> Builder<'a> {
         self.ensure(Libdir { compiler, target })
     }
 
+    pub fn sysroot_codegen_backends(&self, compiler: Compiler) -> PathBuf {
+        self.sysroot_libdir(compiler, compiler.host).with_file_name("codegen-backends")
+    }
+
     /// Returns the compiler's libdir where it stores the dynamic libraries that
     /// it itself links against.
     ///
@@ -710,7 +688,7 @@ impl<'a> Builder<'a> {
 
     /// Adds the compiler's directory of dynamic libraries to `cmd`'s dynamic
     /// library lookup path.
-    pub fn add_rustc_lib_path(&self, compiler: Compiler, cmd: &mut Cargo) {
+    pub fn add_rustc_lib_path(&self, compiler: Compiler, cmd: &mut Command) {
         // Windows doesn't need dylib path munging because the dlls for the
         // compiler live next to the compiler and the system will find them
         // automatically.
@@ -718,7 +696,7 @@ impl<'a> Builder<'a> {
             return;
         }
 
-        add_dylib_path(vec![self.rustc_libdir(compiler)], &mut cmd.command);
+        add_dylib_path(vec![self.rustc_libdir(compiler)], cmd);
     }
 
     /// Gets a path to the compiler specified.
@@ -728,6 +706,15 @@ impl<'a> Builder<'a> {
         } else {
             self.sysroot(compiler).join("bin").join(exe("rustc", compiler.host))
         }
+    }
+
+    /// Gets the paths to all of the compiler's codegen backends.
+    fn codegen_backends(&self, compiler: Compiler) -> impl Iterator<Item = PathBuf> {
+        fs::read_dir(self.sysroot_codegen_backends(compiler))
+            .into_iter()
+            .flatten()
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
     }
 
     pub fn rustdoc(&self, compiler: Compiler) -> PathBuf {
@@ -793,6 +780,12 @@ impl<'a> Builder<'a> {
     ) -> Cargo {
         let mut cargo = Command::new(&self.initial_cargo);
         let out_dir = self.stage_out(compiler, mode);
+
+        // Codegen backends are not yet tracked by -Zbinary-dep-depinfo,
+        // so we need to explicitly clear out if they've been updated.
+        for backend in self.codegen_backends(compiler) {
+            self.clear_if_dirty(&out_dir, &backend);
+        }
 
         if cmd == "doc" || cmd == "rustdoc" {
             let my_out = match mode {
@@ -875,7 +868,7 @@ impl<'a> Builder<'a> {
 
         match mode {
             Mode::Std | Mode::ToolBootstrap | Mode::ToolStd => {}
-            Mode::Rustc | Mode::ToolRustc => {
+            Mode::Rustc | Mode::Codegen | Mode::ToolRustc => {
                 // Build proc macros both for the host and the target
                 if target != compiler.host && cmd != "check" {
                     cargo.arg("-Zdual-proc-macros");
@@ -936,6 +929,8 @@ impl<'a> Builder<'a> {
             // problem, somehow -- not really clear why -- but we know that this
             // fixes things.
             Mode::ToolRustc => metadata.push_str("tool-rustc"),
+            // Same for codegen backends.
+            Mode::Codegen => metadata.push_str("codegen"),
             _ => {}
         }
         cargo.env("__CARGO_DEFAULT_LIB_METADATA", &metadata);
@@ -1062,7 +1057,7 @@ impl<'a> Builder<'a> {
         }
 
         let debuginfo_level = match mode {
-            Mode::Rustc => self.config.rust_debuginfo_level_rustc,
+            Mode::Rustc | Mode::Codegen => self.config.rust_debuginfo_level_rustc,
             Mode::Std => self.config.rust_debuginfo_level_std,
             Mode::ToolBootstrap | Mode::ToolStd | Mode::ToolRustc => {
                 self.config.rust_debuginfo_level_tools
@@ -1236,7 +1231,7 @@ impl<'a> Builder<'a> {
             cargo.env(format!("CC_{}", target.triple), &cc);
 
             let cflags = self.cflags(target, GitRepo::Rustc).join(" ");
-            cargo.env(format!("CFLAGS_{}", target.triple), cflags.clone());
+            cargo.env(format!("CFLAGS_{}", target.triple), &cflags);
 
             if let Some(ar) = self.ar(target) {
                 let ranlib = format!("{} s", ar.display());
@@ -1421,7 +1416,7 @@ impl<'a> Builder<'a> {
             (out, dur - deps)
         };
 
-        if self.config.print_step_timings {
+        if self.config.print_step_timings && !self.config.dry_run {
             println!("[TIMING] {:?} -- {}.{:03}", step, dur.as_secs(), dur.subsec_millis());
         }
 
@@ -1514,6 +1509,10 @@ impl Cargo {
         assert_ne!(key.as_ref(), "RUSTDOCFLAGS");
         self.command.env(key.as_ref(), value.as_ref());
         self
+    }
+
+    pub fn add_rustc_lib_path(&mut self, builder: &Builder<'_>, compiler: Compiler) {
+        builder.add_rustc_lib_path(compiler, &mut self.command);
     }
 }
 

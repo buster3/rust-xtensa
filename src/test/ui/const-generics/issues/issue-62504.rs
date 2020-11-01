@@ -17,8 +17,8 @@ struct ArrayHolder<const X: usize>([u32; X]);
 impl<const X: usize> ArrayHolder<X> {
     pub const fn new() -> Self {
         ArrayHolder([0; Self::SIZE])
-        //[full]~^ ERROR constant expression depends on a generic parameter
-        //[min]~^^ ERROR generic parameters must not be used inside of non trivial constant values
+        //~^ ERROR constant expression depends on a generic parameter
+        //[min]~| ERROR mismatched types
     }
 }
 

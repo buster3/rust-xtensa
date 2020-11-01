@@ -490,7 +490,7 @@ pub fn super_relate_consts<R: TypeRelation<'tcx>>(
     let eagerly_eval = |x: &'tcx ty::Const<'tcx>| x.eval(tcx, relation.param_env()).val;
 
     // FIXME(eddyb) doesn't look like everything below checks that `a.ty == b.ty`.
-    // We could probably always assert it early, as `const` generic parameters
+    // We could probably always assert it early, as const generic parameters
     // are not allowed to depend on other generic parameters, i.e. are concrete.
     // (although there could be normalization differences)
 
@@ -576,7 +576,20 @@ pub fn super_relate_consts<R: TypeRelation<'tcx>>(
             new_val.map(ty::ConstKind::Value)
         }
 
-        // FIXME(const_generics): this is wrong, as it is a projection
+        (
+            ty::ConstKind::Unevaluated(a_def, a_substs, None),
+            ty::ConstKind::Unevaluated(b_def, b_substs, None),
+        ) if tcx.features().const_evaluatable_checked => {
+            if tcx.try_unify_abstract_consts(((a_def, a_substs), (b_def, b_substs))) {
+                Ok(a.val)
+            } else {
+                Err(TypeError::ConstMismatch(expected_found(relation, a, b)))
+            }
+        }
+
+        // While this is slightly incorrect, it shouldn't matter for `min_const_generics`
+        // and is the better alternative to waiting until `const_evaluatable_checked` can
+        // be stabilized.
         (
             ty::ConstKind::Unevaluated(a_def, a_substs, a_promoted),
             ty::ConstKind::Unevaluated(b_def, b_substs, b_promoted),

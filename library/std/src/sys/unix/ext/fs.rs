@@ -650,6 +650,9 @@ pub trait MetadataExt {
     /// ```
     #[stable(feature = "metadata_ext", since = "1.1.0")]
     fn blocks(&self) -> u64;
+    #[cfg(target_os = "vxworks")]
+    #[stable(feature = "metadata_ext", since = "1.1.0")]
+    fn attrib(&self) -> u8;
 }
 
 #[stable(feature = "metadata_ext", since = "1.1.0")]
@@ -701,6 +704,10 @@ impl MetadataExt for fs::Metadata {
     }
     fn blocks(&self) -> u64 {
         self.st_blocks()
+    }
+    #[cfg(target_os = "vxworks")]
+    fn attrib(&self) -> u8 {
+        self.st_attrib()
     }
 }
 
@@ -835,15 +842,6 @@ impl DirEntryExt for fs::DirEntry {
 /// Creates a new symbolic link on the filesystem.
 ///
 /// The `dst` path will be a symbolic link pointing to the `src` path.
-///
-/// # Note
-///
-/// On Windows, you must specify whether a symbolic link points to a file
-/// or directory. Use `os::windows::fs::symlink_file` to create a
-/// symbolic link to a file, or `os::windows::fs::symlink_dir` to create a
-/// symbolic link to a directory. Additionally, the process must have
-/// `SeCreateSymbolicLinkPrivilege` in order to be able to create a
-/// symbolic link.
 ///
 /// # Examples
 ///

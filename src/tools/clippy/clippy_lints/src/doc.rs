@@ -32,12 +32,25 @@ declare_clippy_lint! {
     /// **Known problems:** Lots of bad docs won’t be fixed, what the lint checks
     /// for is limited, and there are still false positives.
     ///
+    /// In addition, when writing documentation comments, including `[]` brackets
+    /// inside a link text would trip the parser. Therfore, documenting link with
+    /// `[`SmallVec<[T; INLINE_CAPACITY]>`]` and then [`SmallVec<[T; INLINE_CAPACITY]>`]: SmallVec
+    /// would fail.
+    ///
     /// **Examples:**
     /// ```rust
     /// /// Do something with the foo_bar parameter. See also
     /// /// that::other::module::foo.
     /// // ^ `foo_bar` and `that::other::module::foo` should be ticked.
     /// fn doit(foo_bar: usize) {}
+    /// ```
+    ///
+    /// ```rust
+    /// // Link text with `[]` brackets should be written as following:
+    /// /// Consume the array and return the inner
+    /// /// [`SmallVec<[T; INLINE_CAPACITY]>`][SmallVec].
+    /// /// [SmallVec]: SmallVec
+    /// fn main() {}
     /// ```
     pub DOC_MARKDOWN,
     pedantic,
@@ -534,7 +547,7 @@ fn check_word(cx: &LateContext<'_>, word: &str, span: Span) {
             return false;
         }
 
-        let s = if s.ends_with('s') { &s[..s.len() - 1] } else { s };
+        let s = s.strip_suffix('s').unwrap_or(s);
 
         s.chars().all(char::is_alphanumeric)
             && s.chars().filter(|&c| c.is_uppercase()).take(2).count() > 1

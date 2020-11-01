@@ -384,6 +384,7 @@ mod prim_char {}
 #[stable(feature = "rust1", since = "1.0.0")]
 mod prim_unit {}
 
+#[doc(alias = "ptr")]
 #[doc(primitive = "pointer")]
 //
 /// Raw, unsafe pointers, `*const T`, and `*mut T`.
@@ -1116,6 +1117,8 @@ mod prim_ref {}
 ///
 /// For more information and a list of supported ABIs, see [the nomicon's
 /// section on foreign calling conventions][nomicon-abi].
+///
+/// [nomicon-abi]: ../nomicon/ffi.html#foreign-calling-conventions
 ///
 /// ### Variadic functions
 ///

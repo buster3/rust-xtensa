@@ -18,9 +18,9 @@ use rustc_ast_pretty::pprust;
 use rustc_attr::{self as attr, is_builtin_attr, HasAttrs};
 use rustc_data_structures::map_in_place::MapInPlace;
 use rustc_data_structures::stack::ensure_sufficient_stack;
-use rustc_errors::{Applicability, PResult};
+use rustc_errors::{struct_span_err, Applicability, PResult};
 use rustc_feature::Features;
-use rustc_parse::parser::Parser;
+use rustc_parse::parser::{AttemptLocalParseRecovery, Parser};
 use rustc_parse::validate_attr;
 use rustc_session::lint::builtin::UNUSED_DOC_COMMENTS;
 use rustc_session::lint::BuiltinLintDiagnostics;
@@ -542,7 +542,7 @@ impl<'a, 'b> MacroExpander<'a, 'b> {
     fn error_derive_forbidden_on_non_adt(&self, derives: &[Path], item: &Annotatable) {
         let attr = self.cx.sess.find_by_name(item.attrs(), sym::derive);
         let span = attr.map_or(item.span(), |attr| attr.span);
-        let mut err = rustc_errors::struct_span_err!(
+        let mut err = struct_span_err!(
             self.cx.sess,
             span,
             E0774,
@@ -921,7 +921,7 @@ pub fn parse_ast_fragment<'a>(
             let mut stmts = SmallVec::new();
             // Won't make progress on a `}`.
             while this.token != token::Eof && this.token != token::CloseDelim(token::Brace) {
-                if let Some(stmt) = this.parse_full_stmt()? {
+                if let Some(stmt) = this.parse_full_stmt(AttemptLocalParseRecovery::Yes)? {
                     stmts.push(stmt);
                 }
             }
@@ -1357,7 +1357,8 @@ impl<'a, 'b> MutVisitor for InvocationCollector<'a, 'b> {
         // we'll expand attributes on expressions separately
         if !stmt.is_expr() {
             let (attr, derives, after_derive) = if stmt.is_item() {
-                self.classify_item(&mut stmt)
+                // FIXME: Handle custom attributes on statements (#15701)
+                (None, vec![], false)
             } else {
                 // ignore derives on non-item statements so it falls through
                 // to the unused-attributes lint
@@ -1785,6 +1786,7 @@ impl<'a, 'b> MutVisitor for InvocationCollector<'a, 'b> {
                 span: at.span,
                 id: at.id,
                 style: at.style,
+                tokens: None,
             };
         } else {
             noop_visit_attribute(at, self)

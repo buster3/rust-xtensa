@@ -94,33 +94,8 @@ use std::process;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use measureme::{EventId, EventIdBuilder, SerializableString, StringId};
+use measureme::{EventId, EventIdBuilder, Profiler, SerializableString, StringId};
 use parking_lot::RwLock;
-
-cfg_if! {
-    if #[cfg(any(windows, target_os = "wasi"))] {
-        /// FileSerializationSink is faster on Windows
-        type SerializationSink = measureme::FileSerializationSink;
-    } else if #[cfg(target_arch = "wasm32")] {
-        type SerializationSink = measureme::ByteVecSink;
-    } else {
-        /// MmapSerializatioSink is faster on macOS and Linux
-        type SerializationSink = measureme::MmapSerializationSink;
-    }
-}
-
-type Profiler = measureme::Profiler<SerializationSink>;
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Ord, PartialOrd)]
-pub enum ProfileCategory {
-    Parsing,
-    Expansion,
-    TypeChecking,
-    BorrowChecking,
-    Codegen,
-    Linking,
-    Other,
-}
 
 bitflags::bitflags! {
     struct EventFilter: u32 {
@@ -400,7 +375,7 @@ impl SelfProfiler {
         output_directory: &Path,
         crate_name: Option<&str>,
         event_filters: &Option<Vec<String>>,
-    ) -> Result<SelfProfiler, Box<dyn Error>> {
+    ) -> Result<SelfProfiler, Box<dyn Error + Send + Sync>> {
         fs::create_dir_all(output_directory)?;
 
         let crate_name = crate_name.unwrap_or("unknown-crate");
@@ -511,13 +486,13 @@ impl SelfProfiler {
         self.event_filter_mask.contains(EventFilter::QUERY_KEYS)
     }
 
-    pub fn event_id_builder(&self) -> EventIdBuilder<'_, SerializationSink> {
+    pub fn event_id_builder(&self) -> EventIdBuilder<'_> {
         EventIdBuilder::new(&self.profiler)
     }
 }
 
 #[must_use]
-pub struct TimingGuard<'a>(Option<measureme::TimingGuard<'a, SerializationSink>>);
+pub struct TimingGuard<'a>(Option<measureme::TimingGuard<'a>>);
 
 impl<'a> TimingGuard<'a> {
     #[inline]
@@ -600,10 +575,7 @@ pub fn print_time_passes_entry(do_it: bool, what: &str, dur: Duration) {
 // Hack up our own formatting for the duration to make it easier for scripts
 // to parse (always use the same number of decimal places and the same unit).
 pub fn duration_to_secs_str(dur: std::time::Duration) -> String {
-    const NANOS_PER_SEC: f64 = 1_000_000_000.0;
-    let secs = dur.as_secs() as f64 + dur.subsec_nanos() as f64 / NANOS_PER_SEC;
-
-    format!("{:.3}", secs)
+    format!("{:.3}", dur.as_secs_f64())
 }
 
 // Memory reporting

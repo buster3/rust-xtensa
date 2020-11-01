@@ -199,7 +199,18 @@ pub enum Res<Id = hir::HirId> {
 
     // Type namespace
     PrimTy(hir::PrimTy),
-    SelfTy(Option<DefId> /* trait */, Option<DefId> /* impl */),
+    /// `Self`, with both an optional trait and impl `DefId`.
+    ///
+    /// HACK(min_const_generics): impl self types also have an optional requirement to not mention
+    /// any generic parameters to allow the following with `min_const_generics`:
+    /// ```rust
+    /// impl Foo { fn test() -> [u8; std::mem::size_of::<Self>()] {} }
+    /// ```
+    /// We do however allow `Self` in repeat expression even if it is generic to not break code
+    /// which already works on stable while causing the `const_evaluatable_unchecked` future compat lint.
+    ///
+    /// FIXME(lazy_normalization_consts): Remove this bodge once that feature is stable.
+    SelfTy(Option<DefId> /* trait */, Option<(DefId, bool)> /* impl */),
     ToolMod, // e.g., `rustfmt` in `#[rustfmt::skip]`
 
     // Value namespace
@@ -332,9 +343,7 @@ impl<T> PerNS<Option<T>> {
 
     /// Returns an iterator over the items which are `Some`.
     pub fn present_items(self) -> impl Iterator<Item = T> {
-        use std::iter::once;
-
-        once(self.type_ns).chain(once(self.value_ns)).chain(once(self.macro_ns)).filter_map(|it| it)
+        IntoIter::new([self.type_ns, self.value_ns, self.macro_ns]).filter_map(|it| it)
     }
 }
 

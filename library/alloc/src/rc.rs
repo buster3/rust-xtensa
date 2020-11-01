@@ -11,7 +11,7 @@
 //! is no exception: you cannot generally obtain a mutable reference to
 //! something inside an [`Rc`]. If you need mutability, put a [`Cell`]
 //! or [`RefCell`] inside the [`Rc`]; see [an example of mutability
-//! inside an Rc][mutability].
+//! inside an `Rc`][mutability].
 //!
 //! [`Rc`] uses non-atomic reference counting. This means that overhead is very
 //! low, but an [`Rc`] cannot be sent between threads, and consequently [`Rc`]
@@ -35,13 +35,27 @@
 //! `Rc<T>` automatically dereferences to `T` (via the [`Deref`] trait),
 //! so you can call `T`'s methods on a value of type [`Rc<T>`][`Rc`]. To avoid name
 //! clashes with `T`'s methods, the methods of [`Rc<T>`][`Rc`] itself are associated
-//! functions, called using function-like syntax:
+//! functions, called using [fully qualified syntax]:
 //!
 //! ```
 //! use std::rc::Rc;
-//! let my_rc = Rc::new(());
 //!
+//! let my_rc = Rc::new(());
 //! Rc::downgrade(&my_rc);
+//! ```
+//!
+//! `Rc<T>`'s implementations of traits like `Clone` may also be called using
+//! fully qualified syntax. Some people prefer to use fully qualified syntax,
+//! while others prefer using method-call syntax.
+//!
+//! ```
+//! use std::rc::Rc;
+//!
+//! let rc = Rc::new(());
+//! // Method-call syntax
+//! let rc2 = rc.clone();
+//! // Fully qualified syntax
+//! let rc3 = Rc::clone(&rc);
 //! ```
 //!
 //! [`Weak<T>`][`Weak`] does not auto-dereference to `T`, because the inner value may have
@@ -54,6 +68,7 @@
 //!
 //! ```
 //! use std::rc::Rc;
+//!
 //! let foo = Rc::new(vec![1.0, 2.0, 3.0]);
 //! // The two syntaxes below are equivalent.
 //! let a = foo.clone();
@@ -218,7 +233,7 @@
 //! [`Cell`]: core::cell::Cell
 //! [`RefCell`]: core::cell::RefCell
 //! [send]: core::marker::Send
-//! [arc]: ../../std/sync/struct.Arc.html
+//! [arc]: crate::sync::Arc
 //! [`Deref`]: core::ops::Deref
 //! [downgrade]: Rc::downgrade
 //! [upgrade]: Weak::upgrade
@@ -247,7 +262,7 @@ use core::pin::Pin;
 use core::ptr::{self, NonNull};
 use core::slice::from_raw_parts_mut;
 
-use crate::alloc::{box_free, handle_alloc_error, AllocErr, AllocRef, Global, Layout};
+use crate::alloc::{box_free, handle_alloc_error, AllocError, AllocRef, Global, Layout};
 use crate::borrow::{Cow, ToOwned};
 use crate::string::String;
 use crate::vec::Vec;
@@ -272,10 +287,9 @@ struct RcBox<T: ?Sized> {
 ///
 /// The inherent methods of `Rc` are all associated functions, which means
 /// that you have to call them as e.g., [`Rc::get_mut(&mut value)`][get_mut] instead of
-/// `value.get_mut()`. This avoids conflicts with methods of the inner
-/// type `T`.
+/// `value.get_mut()`. This avoids conflicts with methods of the inner type `T`.
 ///
-/// [get_mut]: #method.get_mut
+/// [get_mut]: Rc::get_mut
 #[cfg_attr(not(test), rustc_diagnostic_item = "Rc")]
 #[stable(feature = "rust1", since = "1.0.0")]
 pub struct Rc<T: ?Sized> {
@@ -996,7 +1010,7 @@ impl<T: ?Sized> Rc<T> {
     /// and must return back a (potentially fat)-pointer for the `RcBox<T>`.
     unsafe fn allocate_for_layout(
         value_layout: Layout,
-        allocate: impl FnOnce(Layout) -> Result<NonNull<[u8]>, AllocErr>,
+        allocate: impl FnOnce(Layout) -> Result<NonNull<[u8]>, AllocError>,
         mem_to_rcbox: impl FnOnce(*mut u8) -> *mut RcBox<T>,
     ) -> *mut RcBox<T> {
         // Calculate layout using the given value layout.
@@ -1034,7 +1048,7 @@ impl<T: ?Sized> Rc<T> {
 
     fn from_box(v: Box<T>) -> Rc<T> {
         unsafe {
-            let box_unique = Box::into_unique(v);
+            let (box_unique, alloc) = Box::into_unique(v);
             let bptr = box_unique.as_ptr();
 
             let value_size = size_of_val(&*bptr);
@@ -1048,7 +1062,7 @@ impl<T: ?Sized> Rc<T> {
             );
 
             // Free the allocation without dropping its contents
-            box_free(box_unique);
+            box_free(box_unique, alloc);
 
             Self::from_ptr(ptr)
         }
@@ -1721,7 +1735,21 @@ impl<T> Weak<T> {
     pub fn new() -> Weak<T> {
         Weak { ptr: NonNull::new(usize::MAX as *mut RcBox<T>).expect("MAX is not 0") }
     }
+}
 
+pub(crate) fn is_dangling<T: ?Sized>(ptr: NonNull<T>) -> bool {
+    let address = ptr.as_ptr() as *mut () as usize;
+    address == usize::MAX
+}
+
+/// Helper type to allow accessing the reference counts without
+/// making any assertions about the data field.
+struct WeakInner<'a> {
+    weak: &'a Cell<usize>,
+    strong: &'a Cell<usize>,
+}
+
+impl<T: ?Sized> Weak<T> {
     /// Returns a raw pointer to the object `T` pointed to by this `Weak<T>`.
     ///
     /// The pointer is valid only if there are some strong references. The pointer may be dangling,
@@ -1841,33 +1869,20 @@ impl<T> Weak<T> {
     /// [`new`]: Weak::new
     #[stable(feature = "weak_into_raw", since = "1.45.0")]
     pub unsafe fn from_raw(ptr: *const T) -> Self {
-        if ptr.is_null() {
-            Self::new()
-        } else {
-            // See Rc::from_raw for details
-            unsafe {
-                let offset = data_offset(ptr);
-                let fake_ptr = ptr as *mut RcBox<T>;
-                let ptr = set_data_ptr(fake_ptr, (ptr as *mut u8).offset(-offset));
-                Weak { ptr: NonNull::new(ptr).expect("Invalid pointer passed to from_raw") }
-            }
-        }
+        // SAFETY: data_offset is safe to call, because this pointer originates from a Weak.
+        // See Weak::as_ptr for context on how the input pointer is derived.
+        let offset = unsafe { data_offset(ptr) };
+
+        // Reverse the offset to find the original RcBox.
+        // SAFETY: we use wrapping_offset here because the pointer may be dangling (but only if T: Sized).
+        let ptr = unsafe {
+            set_data_ptr(ptr as *mut RcBox<T>, (ptr as *mut u8).wrapping_offset(-offset))
+        };
+
+        // SAFETY: we now have recovered the original Weak pointer, so can create the Weak.
+        Weak { ptr: unsafe { NonNull::new_unchecked(ptr) } }
     }
-}
 
-pub(crate) fn is_dangling<T: ?Sized>(ptr: NonNull<T>) -> bool {
-    let address = ptr.as_ptr() as *mut () as usize;
-    address == usize::MAX
-}
-
-/// Helper type to allow accessing the reference counts without
-/// making any assertions about the data field.
-struct WeakInner<'a> {
-    weak: &'a Cell<usize>,
-    strong: &'a Cell<usize>,
-}
-
-impl<T: ?Sized> Weak<T> {
     /// Attempts to upgrade the `Weak` pointer to an [`Rc`], delaying
     /// dropping of the inner value if successful.
     ///

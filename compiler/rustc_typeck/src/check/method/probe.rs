@@ -446,9 +446,10 @@ fn method_autoderef_steps<'tcx>(
     tcx.infer_ctxt().enter_with_canonical(DUMMY_SP, &goal, |ref infcx, goal, inference_vars| {
         let ParamEnvAnd { param_env, value: self_ty } = goal;
 
-        let mut autoderef = Autoderef::new(infcx, param_env, hir::CRATE_HIR_ID, DUMMY_SP, self_ty)
-            .include_raw_pointers()
-            .silence_errors();
+        let mut autoderef =
+            Autoderef::new(infcx, param_env, hir::CRATE_HIR_ID, DUMMY_SP, self_ty, DUMMY_SP)
+                .include_raw_pointers()
+                .silence_errors();
         let mut reached_raw_pointer = false;
         let mut steps: Vec<_> = autoderef
             .by_ref()
@@ -795,28 +796,29 @@ impl<'a, 'tcx> ProbeContext<'a, 'tcx> {
         // FIXME: do we want to commit to this behavior for param bounds?
         debug!("assemble_inherent_candidates_from_param(param_ty={:?})", param_ty);
 
-        let bounds =
-            self.param_env.caller_bounds().iter().map(ty::Predicate::skip_binders).filter_map(
-                |predicate| match predicate {
-                    ty::PredicateAtom::Trait(trait_predicate, _) => {
-                        match trait_predicate.trait_ref.self_ty().kind() {
-                            ty::Param(ref p) if *p == param_ty => {
-                                Some(ty::Binder::bind(trait_predicate.trait_ref))
-                            }
-                            _ => None,
+        let bounds = self.param_env.caller_bounds().iter().filter_map(|predicate| {
+            let bound_predicate = predicate.bound_atom();
+            match bound_predicate.skip_binder() {
+                ty::PredicateAtom::Trait(trait_predicate, _) => {
+                    match *trait_predicate.trait_ref.self_ty().kind() {
+                        ty::Param(p) if p == param_ty => {
+                            Some(bound_predicate.rebind(trait_predicate.trait_ref))
                         }
+                        _ => None,
                     }
-                    ty::PredicateAtom::Subtype(..)
-                    | ty::PredicateAtom::Projection(..)
-                    | ty::PredicateAtom::RegionOutlives(..)
-                    | ty::PredicateAtom::WellFormed(..)
-                    | ty::PredicateAtom::ObjectSafe(..)
-                    | ty::PredicateAtom::ClosureKind(..)
-                    | ty::PredicateAtom::TypeOutlives(..)
-                    | ty::PredicateAtom::ConstEvaluatable(..)
-                    | ty::PredicateAtom::ConstEquate(..) => None,
-                },
-            );
+                }
+                ty::PredicateAtom::Subtype(..)
+                | ty::PredicateAtom::Projection(..)
+                | ty::PredicateAtom::RegionOutlives(..)
+                | ty::PredicateAtom::WellFormed(..)
+                | ty::PredicateAtom::ObjectSafe(..)
+                | ty::PredicateAtom::ClosureKind(..)
+                | ty::PredicateAtom::TypeOutlives(..)
+                | ty::PredicateAtom::ConstEvaluatable(..)
+                | ty::PredicateAtom::ConstEquate(..)
+                | ty::PredicateAtom::TypeWellFormedFromEnv(..) => None,
+            }
+        });
 
         self.elaborate_bounds(bounds, |this, poly_trait_ref, item| {
             let trait_ref = this.erase_late_bound_regions(&poly_trait_ref);
@@ -1304,7 +1306,7 @@ impl<'a, 'tcx> ProbeContext<'a, 'tcx> {
                     .at(&ObligationCause::dummy(), self.param_env)
                     .sup(candidate.xform_self_ty, self_ty);
                 match self.select_trait_candidate(trait_ref) {
-                    Ok(Some(traits::ImplSource::ImplSourceUserDefined(ref impl_data))) => {
+                    Ok(Some(traits::ImplSource::UserDefined(ref impl_data))) => {
                         // If only a single impl matches, make the error message point
                         // to that impl.
                         ImplSource(impl_data.impl_def_id)

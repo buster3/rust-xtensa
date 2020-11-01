@@ -711,14 +711,14 @@ impl<'tcx> LateContext<'tcx> {
         }
     }
 
-    pub fn current_lint_root(&self) -> hir::HirId {
-        self.last_node_with_lint_attrs
-    }
-
     /// Check if a `DefId`'s path matches the given absolute type path usage.
     ///
     /// Anonymous scopes such as `extern` imports are matched with `kw::Invalid`;
     /// inherent `impl` blocks are matched with the name of the type.
+    ///
+    /// Instead of using this method, it is often preferable to instead use
+    /// `rustc_diagnostic_item` or a `lang_item`. This is less prone to errors
+    /// as paths get invalidated if the target definition moves.
     ///
     /// # Examples
     ///
@@ -842,7 +842,7 @@ impl<'tcx> LateContext<'tcx> {
                     return Ok(path);
                 }
 
-                path.push(disambiguated_data.data.as_symbol());
+                path.push(Symbol::intern(&disambiguated_data.data.to_string()));
                 Ok(path)
             }
 

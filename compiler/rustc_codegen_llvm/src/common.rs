@@ -1,5 +1,3 @@
-#![allow(non_camel_case_types, non_snake_case)]
-
 //! Code that is useful in various codegen modules.
 
 use crate::consts::{self, const_alloc_to_llvm};
@@ -82,6 +80,7 @@ impl Funclet<'ll> {
 
 impl BackendTypes for CodegenCx<'ll, 'tcx> {
     type Value = &'ll Value;
+    // FIXME(eddyb) replace this with a `Function` "subclass" of `Value`.
     type Function = &'ll Value;
 
     type BasicBlock = &'ll BasicBlock;
@@ -89,6 +88,7 @@ impl BackendTypes for CodegenCx<'ll, 'tcx> {
     type Funclet = Funclet<'ll>;
 
     type DIScope = &'ll llvm::debuginfo::DIScope;
+    type DILocation = &'ll llvm::debuginfo::DILocation;
     type DIVariable = &'ll llvm::debuginfo::DIVariable;
 }
 

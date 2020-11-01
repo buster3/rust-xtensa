@@ -21,9 +21,9 @@ pub use self::future::Future;
 #[unstable(feature = "into_future", issue = "67644")]
 pub use into_future::IntoFuture;
 
-#[stable(feature = "future_readiness_fns", since = "1.47.0")]
+#[stable(feature = "future_readiness_fns", since = "1.48.0")]
 pub use pending::{pending, Pending};
-#[stable(feature = "future_readiness_fns", since = "1.47.0")]
+#[stable(feature = "future_readiness_fns", since = "1.48.0")]
 pub use ready::{ready, Ready};
 
 #[unstable(feature = "future_poll_fn", issue = "72302")]
@@ -56,6 +56,7 @@ unsafe impl Sync for ResumeTy {}
 #[lang = "from_generator"]
 #[doc(hidden)]
 #[unstable(feature = "gen_future", issue = "50547")]
+#[rustc_const_unstable(feature = "gen_future", issue = "50547")]
 #[inline]
 pub const fn from_generator<T>(gen: T) -> impl Future<Output = T::Return>
 where

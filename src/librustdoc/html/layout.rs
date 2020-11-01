@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 use crate::externalfiles::ExternalHtml;
@@ -10,6 +11,7 @@ pub struct Layout {
     pub logo: String,
     pub favicon: String,
     pub external_html: ExternalHtml,
+    pub default_settings: HashMap<String, String>,
     pub krate: String,
     /// The given user css file which allow to customize the generated
     /// documentation theme.
@@ -53,6 +55,7 @@ pub fn render<T: Print, S: Print>(
     <link rel=\"stylesheet\" type=\"text/css\" href=\"{static_root_path}rustdoc{suffix}.css\" \
           id=\"mainThemeStyle\">\
     {style_files}\
+    <script id=\"default-settings\"{default_settings}></script>\
     <script src=\"{static_root_path}storage{suffix}.js\"></script>\
     <noscript><link rel=\"stylesheet\" href=\"{static_root_path}noscript{suffix}.css\"></noscript>\
     {css_extension}\
@@ -158,7 +161,9 @@ pub fn render<T: Print, S: Print>(
         keywords = page.keywords,
         favicon = if layout.favicon.is_empty() {
             format!(
-                r#"<link rel="shortcut icon" href="{static_root_path}favicon{suffix}.ico">"#,
+                r##"<link rel="icon" type="image/svg+xml" href="{static_root_path}favicon{suffix}.svg">
+<link rel="alternate icon" type="image/png" href="{static_root_path}favicon-16x16{suffix}.png">
+<link rel="alternate icon" type="image/png" href="{static_root_path}favicon-32x32{suffix}.png">"##,
                 static_root_path = static_root_path,
                 suffix = page.resource_suffix
             )
@@ -170,6 +175,11 @@ pub fn render<T: Print, S: Print>(
         after_content = layout.external_html.after_content,
         sidebar = Buffer::html().to_display(sidebar),
         krate = layout.krate,
+        default_settings = layout
+            .default_settings
+            .iter()
+            .map(|(k, v)| format!(r#" data-{}="{}""#, k.replace('-', "_"), Escape(v)))
+            .collect::<String>(),
         style_files = style_files
             .iter()
             .filter_map(|t| {

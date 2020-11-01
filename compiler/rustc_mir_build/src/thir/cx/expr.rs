@@ -117,7 +117,14 @@ fn apply_adjustment<'a, 'tcx>(
                 },
             };
 
-            overloaded_place(cx, hir_expr, adjustment.target, Some(call), vec![expr.to_ref()])
+            overloaded_place(
+                cx,
+                hir_expr,
+                adjustment.target,
+                Some(call),
+                vec![expr.to_ref()],
+                deref.span,
+            )
         }
         Adjust::Borrow(AutoBorrow::Ref(_, m)) => {
             ExprKind::Borrow { borrow_kind: m.to_borrow_kind(), arg: expr.to_ref() }
@@ -277,7 +284,14 @@ fn make_mirror_unadjusted<'a, 'tcx>(
 
         hir::ExprKind::Index(ref lhs, ref index) => {
             if cx.typeck_results().is_method_call(expr) {
-                overloaded_place(cx, expr, expr_ty, None, vec![lhs.to_ref(), index.to_ref()])
+                overloaded_place(
+                    cx,
+                    expr,
+                    expr_ty,
+                    None,
+                    vec![lhs.to_ref(), index.to_ref()],
+                    expr.span,
+                )
             } else {
                 ExprKind::Index { lhs: lhs.to_ref(), index: index.to_ref() }
             }
@@ -285,7 +299,7 @@ fn make_mirror_unadjusted<'a, 'tcx>(
 
         hir::ExprKind::Unary(hir::UnOp::UnDeref, ref arg) => {
             if cx.typeck_results().is_method_call(expr) {
-                overloaded_place(cx, expr, expr_ty, None, vec![arg.to_ref()])
+                overloaded_place(cx, expr, expr_ty, None, vec![arg.to_ref()], expr.span)
             } else {
                 ExprKind::Deref { arg: arg.to_ref() }
             }
@@ -302,16 +316,14 @@ fn make_mirror_unadjusted<'a, 'tcx>(
         hir::ExprKind::Unary(hir::UnOp::UnNeg, ref arg) => {
             if cx.typeck_results().is_method_call(expr) {
                 overloaded_operator(cx, expr, vec![arg.to_ref()])
-            } else {
-                if let hir::ExprKind::Lit(ref lit) = arg.kind {
-                    ExprKind::Literal {
-                        literal: cx.const_eval_literal(&lit.node, expr_ty, lit.span, true),
-                        user_ty: None,
-                        const_id: None,
-                    }
-                } else {
-                    ExprKind::Unary { op: UnOp::Neg, arg: arg.to_ref() }
+            } else if let hir::ExprKind::Lit(ref lit) = arg.kind {
+                ExprKind::Literal {
+                    literal: cx.const_eval_literal(&lit.node, expr_ty, lit.span, true),
+                    user_ty: None,
+                    const_id: None,
                 }
+            } else {
+                ExprKind::Unary { op: UnOp::Neg, arg: arg.to_ref() }
             }
         }
 
@@ -497,6 +509,12 @@ fn make_mirror_unadjusted<'a, 'tcx>(
             inputs: asm.inputs_exprs.to_ref(),
         },
 
+        hir::ExprKind::ConstBlock(ref anon_const) => {
+            let anon_const_def_id = cx.tcx.hir().local_def_id(anon_const.hir_id);
+            let value = ty::Const::from_anon_const(cx.tcx, anon_const_def_id);
+
+            ExprKind::ConstBlock { value }
+        }
         // Now comes the rote stuff:
         hir::ExprKind::Repeat(ref v, ref count) => {
             let count_def_id = cx.tcx.hir().local_def_id(count.hir_id);
@@ -1025,6 +1043,7 @@ fn overloaded_place<'a, 'tcx>(
     place_ty: Ty<'tcx>,
     overloaded_callee: Option<(DefId, SubstsRef<'tcx>)>,
     args: Vec<ExprRef<'tcx>>,
+    span: Span,
 ) -> ExprKind<'tcx> {
     // For an overloaded *x or x[y] expression of type T, the method
     // call returns an &T and we must add the deref so that the types
@@ -1040,24 +1059,24 @@ fn overloaded_place<'a, 'tcx>(
     // `Deref(Mut)::Deref(_mut)` and `Index(Mut)::index(_mut)`.
     let (region, mutbl) = match *recv_ty.kind() {
         ty::Ref(region, _, mutbl) => (region, mutbl),
-        _ => span_bug!(expr.span, "overloaded_place: receiver is not a reference"),
+        _ => span_bug!(span, "overloaded_place: receiver is not a reference"),
     };
     let ref_ty = cx.tcx.mk_ref(region, ty::TypeAndMut { ty: place_ty, mutbl });
 
     // construct the complete expression `foo()` for the overloaded call,
     // which will yield the &T type
     let temp_lifetime = cx.region_scope_tree.temporary_scope(expr.hir_id.local_id);
-    let fun = method_callee(cx, expr, expr.span, overloaded_callee);
+    let fun = method_callee(cx, expr, span, overloaded_callee);
     let ref_expr = Expr {
         temp_lifetime,
         ty: ref_ty,
-        span: expr.span,
+        span,
         kind: ExprKind::Call {
             ty: fun.ty,
             fun: fun.to_ref(),
             args,
             from_hir_call: false,
-            fn_span: expr.span,
+            fn_span: span,
         },
     };
 

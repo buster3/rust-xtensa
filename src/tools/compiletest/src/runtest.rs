@@ -1775,6 +1775,11 @@ impl<'test> TestCx<'test> {
         let mut aux_rustc =
             aux_cx.make_compile_args(input_file, aux_output, EmitMetadata::No, AllowUnused::No);
 
+        for key in &aux_props.unset_rustc_env {
+            aux_rustc.env_remove(key);
+        }
+        aux_rustc.envs(aux_props.rustc_env.clone());
+
         let (dylib, crate_type) = if aux_props.no_prefer_dynamic {
             (true, None)
         } else if self.config.target.contains("cloudabi")
@@ -3156,12 +3161,12 @@ impl<'test> TestCx<'test> {
 
         if self.config.bless {
             for e in
-                glob(&format!("{}/{}.*.mir{}", test_dir.display(), test_crate, bit_width)).unwrap()
+                glob(&format!("{}/{}.*{}.mir", test_dir.display(), test_crate, bit_width)).unwrap()
             {
                 std::fs::remove_file(e.unwrap()).unwrap();
             }
             for e in
-                glob(&format!("{}/{}.*.diff{}", test_dir.display(), test_crate, bit_width)).unwrap()
+                glob(&format!("{}/{}.*{}.diff", test_dir.display(), test_crate, bit_width)).unwrap()
             {
                 std::fs::remove_file(e.unwrap()).unwrap();
             }
@@ -3181,7 +3186,7 @@ impl<'test> TestCx<'test> {
                     let trimmed = test_name.trim_end_matches(".diff");
                     let test_against = format!("{}.after.mir", trimmed);
                     from_file = format!("{}.before.mir", trimmed);
-                    expected_file = format!("{}{}", test_name, bit_width);
+                    expected_file = format!("{}{}.diff", trimmed, bit_width);
                     assert!(
                         test_names.next().is_none(),
                         "two mir pass names specified for MIR diff"
@@ -3199,7 +3204,18 @@ impl<'test> TestCx<'test> {
                     from_file = format!("{}.{}.mir", test_name, first_pass);
                     to_file = Some(second_file);
                 } else {
-                    expected_file = format!("{}{}", test_name, bit_width);
+                    let ext_re = Regex::new(r#"(\.(mir|dot|html))$"#).unwrap();
+                    let cap = ext_re
+                        .captures_iter(test_name)
+                        .next()
+                        .expect("test_name has an invalid extension");
+                    let extension = cap.get(1).unwrap().as_str();
+                    expected_file = format!(
+                        "{}{}{}",
+                        test_name.trim_end_matches(extension),
+                        bit_width,
+                        extension,
+                    );
                     from_file = test_name.to_string();
                     assert!(
                         test_names.next().is_none(),

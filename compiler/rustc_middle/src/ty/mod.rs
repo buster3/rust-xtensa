@@ -7,7 +7,6 @@ pub use self::Variance::*;
 
 use crate::hir::exports::ExportMap;
 use crate::ich::StableHashingContext;
-use crate::infer::canonical::Canonical;
 use crate::middle::cstore::CrateStoreDyn;
 use crate::middle::resolve_lifetime::ObjectLifetimeDefault;
 use crate::mir::interpret::ErrorHandled;
@@ -47,7 +46,7 @@ use std::cell::RefCell;
 use std::cmp::Ordering;
 use std::fmt;
 use std::hash::{Hash, Hasher};
-use std::ops::Range;
+use std::ops::{ControlFlow, Range};
 use std::ptr;
 use std::str;
 
@@ -126,6 +125,7 @@ mod sty;
 pub struct ResolverOutputs {
     pub definitions: rustc_hir::definitions::Definitions,
     pub cstore: Box<CrateStoreDyn>,
+    pub visibilities: FxHashMap<LocalDefId, Visibility>,
     pub extern_crate_map: FxHashMap<LocalDefId, CrateNum>,
     pub maybe_unused_trait_imports: FxHashSet<LocalDefId>,
     pub maybe_unused_extern_crates: Vec<(LocalDefId, Span)>,
@@ -264,6 +264,10 @@ impl<'tcx> AssociatedItems<'tcx> {
     /// for a known trait, make that trait a lang item instead of indexing this array.
     pub fn in_definition_order(&self) -> impl '_ + Iterator<Item = &ty::AssocItem> {
         self.items.iter().map(|(_, v)| *v)
+    }
+
+    pub fn len(&self) -> usize {
+        self.items.len()
     }
 
     /// Returns an iterator over all associated items with the given name, ignoring hygiene.
@@ -656,8 +660,6 @@ impl<'a, 'tcx> HashStable<StableHashingContext<'a>> for TyS<'tcx> {
 #[rustc_diagnostic_item = "Ty"]
 pub type Ty<'tcx> = &'tcx TyS<'tcx>;
 
-pub type CanonicalTy<'tcx> = Canonical<'tcx, Ty<'tcx>>;
-
 #[derive(Clone, Copy, PartialEq, Eq, Hash, TyEncodable, TyDecodable, HashStable)]
 pub struct UpvarPath {
     pub hir_id: hir::HirId,
@@ -682,25 +684,31 @@ pub enum BorrowKind {
     /// implicit closure bindings. It is needed when the closure
     /// is borrowing or mutating a mutable referent, e.g.:
     ///
-    ///    let x: &mut isize = ...;
-    ///    let y = || *x += 5;
+    /// ```
+    /// let x: &mut isize = ...;
+    /// let y = || *x += 5;
+    /// ```
     ///
     /// If we were to try to translate this closure into a more explicit
     /// form, we'd encounter an error with the code as written:
     ///
-    ///    struct Env { x: & &mut isize }
-    ///    let x: &mut isize = ...;
-    ///    let y = (&mut Env { &x }, fn_ptr);  // Closure is pair of env and fn
-    ///    fn fn_ptr(env: &mut Env) { **env.x += 5; }
+    /// ```
+    /// struct Env { x: & &mut isize }
+    /// let x: &mut isize = ...;
+    /// let y = (&mut Env { &x }, fn_ptr);  // Closure is pair of env and fn
+    /// fn fn_ptr(env: &mut Env) { **env.x += 5; }
+    /// ```
     ///
     /// This is then illegal because you cannot mutate a `&mut` found
     /// in an aliasable location. To solve, you'd have to translate with
     /// an `&mut` borrow:
     ///
-    ///    struct Env { x: & &mut isize }
-    ///    let x: &mut isize = ...;
-    ///    let y = (&mut Env { &mut x }, fn_ptr); // changed from &x to &mut x
-    ///    fn fn_ptr(env: &mut Env) { **env.x += 5; }
+    /// ```
+    /// struct Env { x: & &mut isize }
+    /// let x: &mut isize = ...;
+    /// let y = (&mut Env { &mut x }, fn_ptr); // changed from &x to &mut x
+    /// fn fn_ptr(env: &mut Env) { **env.x += 5; }
+    /// ```
     ///
     /// Now the assignment to `**env.x` is legal, but creating a
     /// mutable pointer to `x` is not because `x` is not mutable. We
@@ -761,10 +769,6 @@ pub enum IntVarValue {
 pub struct FloatVarValue(pub ast::FloatTy);
 
 impl ty::EarlyBoundRegion {
-    pub fn to_bound_region(&self) -> ty::BoundRegion {
-        ty::BoundRegion::BrNamed(self.def_id, self.name)
-    }
-
     /// Does this early bound region have a name? Early bound regions normally
     /// always have names except when using anonymous lifetimes (`'_`).
     pub fn has_name(&self) -> bool {
@@ -811,14 +815,6 @@ impl GenericParamDef {
     pub fn to_early_bound_region_data(&self) -> ty::EarlyBoundRegion {
         if let GenericParamDefKind::Lifetime = self.kind {
             ty::EarlyBoundRegion { def_id: self.def_id, index: self.index, name: self.name }
-        } else {
-            bug!("cannot convert a non-lifetime parameter def to an early bound region")
-        }
-    }
-
-    pub fn to_bound_region(&self) -> ty::BoundRegion {
-        if let GenericParamDefKind::Lifetime = self.kind {
-            self.to_early_bound_region_data().to_bound_region()
         } else {
             bug!("cannot convert a non-lifetime parameter def to an early bound region")
         }
@@ -997,22 +993,6 @@ impl<'tcx> GenericPredicates<'tcx> {
         instantiated.predicates.extend(self.predicates.iter().map(|(p, _)| p));
         instantiated.spans.extend(self.predicates.iter().map(|(_, s)| s));
     }
-
-    pub fn instantiate_supertrait(
-        &self,
-        tcx: TyCtxt<'tcx>,
-        poly_trait_ref: &ty::PolyTraitRef<'tcx>,
-    ) -> InstantiatedPredicates<'tcx> {
-        assert_eq!(self.parent, None);
-        InstantiatedPredicates {
-            predicates: self
-                .predicates
-                .iter()
-                .map(|(pred, _)| pred.subst_supertrait(tcx, poly_trait_ref))
-                .collect(),
-            spans: self.predicates.iter().map(|(_, sp)| *sp).collect(),
-        }
-    }
 }
 
 #[derive(Debug)]
@@ -1081,9 +1061,21 @@ impl<'tcx> Predicate<'tcx> {
         }
     }
 
+    /// Converts this to a `Binder<PredicateAtom<'tcx>>`. If the value was an
+    /// `Atom`, then it is not allowed to contain escaping bound vars.
+    pub fn bound_atom(self) -> Binder<PredicateAtom<'tcx>> {
+        match self.kind() {
+            &PredicateKind::ForAll(binder) => binder,
+            &PredicateKind::Atom(atom) => {
+                debug_assert!(!atom.has_escaping_bound_vars());
+                Binder::dummy(atom)
+            }
+        }
+    }
+
     /// Allows using a `Binder<PredicateAtom<'tcx>>` even if the given predicate previously
     /// contained unbound variables by shifting these variables outwards.
-    pub fn bound_atom(self, tcx: TyCtxt<'tcx>) -> Binder<PredicateAtom<'tcx>> {
+    pub fn bound_atom_with_opt_escaping(self, tcx: TyCtxt<'tcx>) -> Binder<PredicateAtom<'tcx>> {
         match self.kind() {
             &PredicateKind::ForAll(binder) => binder,
             &PredicateKind::Atom(atom) => Binder::wrap_nonbinding(tcx, atom),
@@ -1155,6 +1147,11 @@ pub enum PredicateAtom<'tcx> {
 
     /// Constants must be equal. The first component is the const that is expected.
     ConstEquate(&'tcx Const<'tcx>, &'tcx Const<'tcx>),
+
+    /// Represents a type found in the environment that we can use for implied bounds.
+    ///
+    /// Only used for Chalk.
+    TypeWellFormedFromEnv(Ty<'tcx>),
 }
 
 impl<'tcx> PredicateAtom<'tcx> {
@@ -1292,7 +1289,6 @@ impl<'tcx> PolyTraitPredicate<'tcx> {
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, TyEncodable, TyDecodable)]
 #[derive(HashStable, TypeFoldable)]
 pub struct OutlivesPredicate<A, B>(pub A, pub B); // `A: B`
-pub type PolyOutlivesPredicate<A, B> = ty::Binder<OutlivesPredicate<A, B>>;
 pub type RegionOutlivesPredicate<'tcx> = OutlivesPredicate<ty::Region<'tcx>, ty::Region<'tcx>>;
 pub type TypeOutlivesPredicate<'tcx> = OutlivesPredicate<Ty<'tcx>, ty::Region<'tcx>>;
 pub type PolyRegionOutlivesPredicate<'tcx> = ty::Binder<RegionOutlivesPredicate<'tcx>>;
@@ -1450,7 +1446,8 @@ impl<'tcx> Predicate<'tcx> {
             | PredicateAtom::ClosureKind(..)
             | PredicateAtom::TypeOutlives(..)
             | PredicateAtom::ConstEvaluatable(..)
-            | PredicateAtom::ConstEquate(..) => None,
+            | PredicateAtom::ConstEquate(..)
+            | PredicateAtom::TypeWellFormedFromEnv(..) => None,
         }
     }
 
@@ -1465,7 +1462,8 @@ impl<'tcx> Predicate<'tcx> {
             | PredicateAtom::ObjectSafe(..)
             | PredicateAtom::ClosureKind(..)
             | PredicateAtom::ConstEvaluatable(..)
-            | PredicateAtom::ConstEquate(..) => None,
+            | PredicateAtom::ConstEquate(..)
+            | PredicateAtom::TypeWellFormedFromEnv(..) => None,
         }
     }
 }
@@ -1738,11 +1736,6 @@ pub struct ParamEnv<'tcx> {
     ///
     /// Note: This is packed, use the reveal() method to access it.
     packed: CopyTaggedPtr<&'tcx List<Predicate<'tcx>>, traits::Reveal, true>,
-
-    /// If this `ParamEnv` comes from a call to `tcx.param_env(def_id)`,
-    /// register that `def_id` (useful for transitioning to the chalk trait
-    /// solver).
-    pub def_id: Option<DefId>,
 }
 
 unsafe impl rustc_data_structures::tagged_ptr::Tag for traits::Reveal {
@@ -1767,7 +1760,6 @@ impl<'tcx> fmt::Debug for ParamEnv<'tcx> {
         f.debug_struct("ParamEnv")
             .field("caller_bounds", &self.caller_bounds())
             .field("reveal", &self.reveal())
-            .field("def_id", &self.def_id)
             .finish()
     }
 }
@@ -1776,23 +1768,17 @@ impl<'a, 'tcx> HashStable<StableHashingContext<'a>> for ParamEnv<'tcx> {
     fn hash_stable(&self, hcx: &mut StableHashingContext<'a>, hasher: &mut StableHasher) {
         self.caller_bounds().hash_stable(hcx, hasher);
         self.reveal().hash_stable(hcx, hasher);
-        self.def_id.hash_stable(hcx, hasher);
     }
 }
 
 impl<'tcx> TypeFoldable<'tcx> for ParamEnv<'tcx> {
     fn super_fold_with<F: ty::fold::TypeFolder<'tcx>>(&self, folder: &mut F) -> Self {
-        ParamEnv::new(
-            self.caller_bounds().fold_with(folder),
-            self.reveal().fold_with(folder),
-            self.def_id.fold_with(folder),
-        )
+        ParamEnv::new(self.caller_bounds().fold_with(folder), self.reveal().fold_with(folder))
     }
 
-    fn super_visit_with<V: TypeVisitor<'tcx>>(&self, visitor: &mut V) -> bool {
-        self.caller_bounds().visit_with(visitor)
-            || self.reveal().visit_with(visitor)
-            || self.def_id.visit_with(visitor)
+    fn super_visit_with<V: TypeVisitor<'tcx>>(&self, visitor: &mut V) -> ControlFlow<()> {
+        self.caller_bounds().visit_with(visitor)?;
+        self.reveal().visit_with(visitor)
     }
 }
 
@@ -1803,7 +1789,7 @@ impl<'tcx> ParamEnv<'tcx> {
     /// type-checking.
     #[inline]
     pub fn empty() -> Self {
-        Self::new(List::empty(), Reveal::UserFacing, None)
+        Self::new(List::empty(), Reveal::UserFacing)
     }
 
     #[inline]
@@ -1825,17 +1811,13 @@ impl<'tcx> ParamEnv<'tcx> {
     /// or invoke `param_env.with_reveal_all()`.
     #[inline]
     pub fn reveal_all() -> Self {
-        Self::new(List::empty(), Reveal::All, None)
+        Self::new(List::empty(), Reveal::All)
     }
 
     /// Construct a trait environment with the given set of predicates.
     #[inline]
-    pub fn new(
-        caller_bounds: &'tcx List<Predicate<'tcx>>,
-        reveal: Reveal,
-        def_id: Option<DefId>,
-    ) -> Self {
-        ty::ParamEnv { packed: CopyTaggedPtr::new(caller_bounds, reveal), def_id }
+    pub fn new(caller_bounds: &'tcx List<Predicate<'tcx>>, reveal: Reveal) -> Self {
+        ty::ParamEnv { packed: CopyTaggedPtr::new(caller_bounds, reveal) }
     }
 
     pub fn with_user_facing(mut self) -> Self {
@@ -1857,12 +1839,12 @@ impl<'tcx> ParamEnv<'tcx> {
             return self;
         }
 
-        ParamEnv::new(tcx.normalize_opaque_types(self.caller_bounds()), Reveal::All, self.def_id)
+        ParamEnv::new(tcx.normalize_opaque_types(self.caller_bounds()), Reveal::All)
     }
 
     /// Returns this same environment but with no caller bounds.
     pub fn without_caller_bounds(self) -> Self {
-        Self::new(List::empty(), self.reveal(), self.def_id)
+        Self::new(List::empty(), self.reveal())
     }
 
     /// Creates a suitable environment in which to perform trait
@@ -2009,7 +1991,7 @@ pub struct VariantDef {
     flags: VariantFlags,
 }
 
-impl<'tcx> VariantDef {
+impl VariantDef {
     /// Creates a new `VariantDef`.
     ///
     /// `variant_did` is the `DefId` that identifies the enum variant (if this `VariantDef`
@@ -2074,19 +2056,6 @@ impl<'tcx> VariantDef {
     #[inline]
     pub fn is_recovered(&self) -> bool {
         self.flags.intersects(VariantFlags::IS_RECOVERED)
-    }
-
-    /// `repr(transparent)` structs can have a single non-ZST field, this function returns that
-    /// field.
-    pub fn transparent_newtype_field(&self, tcx: TyCtxt<'tcx>) -> Option<&FieldDef> {
-        for field in &self.fields {
-            let field_ty = field.ty(tcx, InternalSubsts::identity_for_item(tcx, self.def_id));
-            if !field_ty.is_zst(tcx, self.def_id) {
-                return Some(field);
-            }
-        }
-
-        None
     }
 }
 
@@ -2485,8 +2454,10 @@ impl<'tcx> AdtDef {
         self.variants.iter().flat_map(|v| v.fields.iter())
     }
 
+    /// Whether the ADT lacks fields. Note that this includes uninhabited enums,
+    /// e.g., `enum Void {}` is considered payload free as well.
     pub fn is_payloadfree(&self) -> bool {
-        !self.variants.is_empty() && self.variants.iter().all(|v| v.fields.is_empty())
+        self.variants.iter().all(|v| v.fields.is_empty())
     }
 
     /// Return a `VariantDef` given a variant id.
@@ -2695,18 +2666,18 @@ impl<'tcx> ClosureKind {
         }
     }
 
-    /// Returns `true` if this a type that impls this closure kind
+    /// Returns `true` if a type that impls this closure kind
     /// must also implement `other`.
     pub fn extends(self, other: ty::ClosureKind) -> bool {
-        match (self, other) {
-            (ClosureKind::Fn, ClosureKind::Fn) => true,
-            (ClosureKind::Fn, ClosureKind::FnMut) => true,
-            (ClosureKind::Fn, ClosureKind::FnOnce) => true,
-            (ClosureKind::FnMut, ClosureKind::FnMut) => true,
-            (ClosureKind::FnMut, ClosureKind::FnOnce) => true,
-            (ClosureKind::FnOnce, ClosureKind::FnOnce) => true,
-            _ => false,
-        }
+        matches!(
+            (self, other),
+            (ClosureKind::Fn, ClosureKind::Fn)
+                | (ClosureKind::Fn, ClosureKind::FnMut)
+                | (ClosureKind::Fn, ClosureKind::FnOnce)
+                | (ClosureKind::FnMut, ClosureKind::FnMut)
+                | (ClosureKind::FnMut, ClosureKind::FnOnce)
+                | (ClosureKind::FnOnce, ClosureKind::FnOnce)
+        )
     }
 
     /// Returns the representative scalar type for this closure kind.
@@ -2832,15 +2803,15 @@ impl<'tcx> TyCtxt<'tcx> {
 
     pub fn opt_associated_item(self, def_id: DefId) -> Option<&'tcx AssocItem> {
         let is_associated_item = if let Some(def_id) = def_id.as_local() {
-            match self.hir().get(self.hir().local_def_id_to_hir_id(def_id)) {
-                Node::TraitItem(_) | Node::ImplItem(_) => true,
-                _ => false,
-            }
+            matches!(
+                self.hir().get(self.hir().local_def_id_to_hir_id(def_id)),
+                Node::TraitItem(_) | Node::ImplItem(_)
+            )
         } else {
-            match self.def_kind(def_id) {
-                DefKind::AssocConst | DefKind::AssocFn | DefKind::AssocTy => true,
-                _ => false,
-            }
+            matches!(
+                self.def_kind(def_id),
+                DefKind::AssocConst | DefKind::AssocFn | DefKind::AssocTy
+            )
         };
 
         is_associated_item.then(|| self.associated_item(def_id))
@@ -2970,13 +2941,7 @@ impl<'tcx> TyCtxt<'tcx> {
     /// Returns the possibly-auto-generated MIR of a `(DefId, Subst)` pair.
     pub fn instance_mir(self, instance: ty::InstanceDef<'tcx>) -> &'tcx Body<'tcx> {
         match instance {
-            ty::InstanceDef::Item(def) => {
-                if let Some((did, param_did)) = def.as_const_arg() {
-                    self.optimized_mir_of_const_arg((did, param_did))
-                } else {
-                    self.optimized_mir(def.did)
-                }
-            }
+            ty::InstanceDef::Item(def) => self.optimized_mir_opt_const_arg(def),
             ty::InstanceDef::VtableShim(..)
             | ty::InstanceDef::ReifyShim(..)
             | ty::InstanceDef::Intrinsic(..)
@@ -3051,10 +3016,12 @@ impl<'tcx> TyCtxt<'tcx> {
                 .hygienic_eq(def_name.span.ctxt(), self.expansion_that_defined(def_parent_def_id))
     }
 
-    fn expansion_that_defined(self, scope: DefId) -> ExpnId {
+    pub fn expansion_that_defined(self, scope: DefId) -> ExpnId {
         match scope.as_local() {
+            // Parsing and expansion aren't incremental, so we don't
+            // need to go through a query for the same-crate case.
             Some(scope) => self.hir().definitions().expansion_that_defined(scope),
-            None => ExpnId::root(),
+            None => self.expn_that_defined(scope),
         }
     }
 
